@@ -1,0 +1,19 @@
+# Environment variables and secret keys
+.env
+*.env.local
+
+# Python / Node caches (whichever you use)
+__pycache__/
+*.pyc
+node_modules/
+.pytest_cache/
+
+# Operating system artifacts
+.DS_Store
+Thumbs.db
+
+# Temporary scratchpads (optional)
+scratchpad/
+
+# Private case study / requirements document
+autonomous_codebase_refactoring_migration_agent.md
