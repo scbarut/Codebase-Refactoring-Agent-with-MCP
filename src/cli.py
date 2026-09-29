@@ -226,6 +226,14 @@ def mcp_ast() -> None:
     ast_server_main()
 
 
+@cli.command("mcp-docs")
+def mcp_docs() -> None:
+    """Start the mcp-server-docs server with stdio transport."""
+    from src.mcp_servers.docs_server import main as docs_server_main
+
+    docs_server_main()
+
+
 def main() -> None:
     """CLI entry point for pyproject.toml script."""
     cli(obj={})

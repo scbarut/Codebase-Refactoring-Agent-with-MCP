@@ -4,13 +4,13 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** ready-for-human
 
-- [ ] MCP server registered with stdio transport, discoverable by the agent
-- [ ] `lookup_doc_ref` tool: given a `doc_ref` string (e.g., `pydantic-v2-migration.md#validator-to-field-validator`), returns the referenced section content from the Doc Corpus
-- [ ] `search_corpus` tool: given a query string, performs BM25 keyword search over all Doc Corpus markdown files and returns the top-k relevant chunks
-- [ ] `web_search` tool: given an error traceback or query, performs a constrained web search (Tavily or DuckDuckGo + Trafilatura), returns top-3 chunks within ≤1500 tokens total, as clean markdown without HTML artifacts
-- [ ] Doc Corpus directory structure: `src/docs_corpus/<target-library>/` with markdown files
-- [ ] Tests verify flat-file lookup returns exact sections
-- [ ] Tests verify BM25 search ranks relevant chunks higher than irrelevant ones
-- [ ] Tests verify web fallback respects the 1500-token budget and returns clean markdown
+- [x] MCP server registered with stdio transport, discoverable by the agent
+- [x] `lookup_doc_ref` tool: given a `doc_ref` string (e.g., `pydantic-v2-migration.md#validator-to-field-validator`), returns the referenced section content from the Doc Corpus
+- [x] `search_corpus` tool: given a query string, performs BM25 keyword search over all Doc Corpus markdown files and returns the top-k relevant chunks
+- [x] `web_search` tool: given an error traceback or query, performs a constrained web search (Tavily or DuckDuckGo + Trafilatura), returns top-3 chunks within ≤1500 tokens total, as clean markdown without HTML artifacts
+- [x] Doc Corpus directory structure: `src/docs_corpus/<target-library>/` with markdown files
+- [x] Tests verify flat-file lookup returns exact sections
+- [x] Tests verify BM25 search ranks relevant chunks higher than irrelevant ones
+- [x] Tests verify web fallback respects the 1500-token budget and returns clean markdown

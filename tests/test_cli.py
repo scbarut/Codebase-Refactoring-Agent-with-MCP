@@ -61,3 +61,11 @@ def test_cli_mcp_ast_help():
     assert result.exit_code == 0
     assert "Start the mcp-server-ast server" in result.output
 
+
+def test_cli_mcp_docs_help():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mcp-docs", "--help"])
+    assert result.exit_code == 0
+    assert "Start the mcp-server-docs server" in result.output
+
+

@@ -38,6 +38,7 @@ dev = [
 migration-agent = "src.cli:main"
 mcp-server-git = "src.mcp_servers.git_server:main"
 mcp-server-ast = "src.mcp_servers.ast_server:main"
+mcp-server-docs = "src.mcp_servers.docs_server:main"
 
 [build-system]
 requires = ["hatchling"]
