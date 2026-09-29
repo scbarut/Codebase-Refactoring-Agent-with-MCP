@@ -214,7 +214,16 @@ def status() -> None:
 def mcp_git() -> None:
     """Start the mcp-server-git server with stdio transport."""
     from src.mcp_servers.git_server import main as git_server_main
+
     git_server_main()
+
+
+@cli.command("mcp-ast")
+def mcp_ast() -> None:
+    """Start the mcp-server-ast server with stdio transport."""
+    from src.mcp_servers.ast_server import main as ast_server_main
+
+    ast_server_main()
 
 
 def main() -> None:

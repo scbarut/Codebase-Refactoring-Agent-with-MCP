@@ -54,3 +54,10 @@ def test_cli_mcp_git_help():
     assert result.exit_code == 0
     assert "Start the mcp-server-git server" in result.output
 
+
+def test_cli_mcp_ast_help():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mcp-ast", "--help"])
+    assert result.exit_code == 0
+    assert "Start the mcp-server-ast server" in result.output
+

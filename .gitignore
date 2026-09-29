@@ -49,3 +49,6 @@ scratchpad/
 
 # Private case study / requirements document
 autonomous_codebase_refactoring_migration_agent.md
+
+# Local Agent Customizations
+.agents/
