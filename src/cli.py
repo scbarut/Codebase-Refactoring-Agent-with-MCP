@@ -210,6 +210,13 @@ def status() -> None:
     subprocess.run(cmd, check=False)
 
 
+@cli.command("mcp-git")
+def mcp_git() -> None:
+    """Start the mcp-server-git server with stdio transport."""
+    from src.mcp_servers.git_server import main as git_server_main
+    git_server_main()
+
+
 def main() -> None:
     """CLI entry point for pyproject.toml script."""
     cli(obj={})

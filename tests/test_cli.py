@@ -46,3 +46,11 @@ def test_cli_start_docker_error(mock_compose_up):
     result = runner.invoke(cli, ["start"])
     assert result.exit_code != 0
     assert "Docker daemon is not running" in result.output
+
+
+def test_cli_mcp_git_help():
+    runner = CliRunner()
+    result = runner.invoke(cli, ["mcp-git", "--help"])
+    assert result.exit_code == 0
+    assert "Start the mcp-server-git server" in result.output
+
