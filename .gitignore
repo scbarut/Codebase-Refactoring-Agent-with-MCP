@@ -36,6 +36,7 @@ ENV/
 node_modules/
 .next/
 out/
+*.tsbuildinfo
 .pnp
 .pnp.js
 
