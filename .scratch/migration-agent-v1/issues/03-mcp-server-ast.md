@@ -4,7 +4,7 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-human
+**Status:** resolved
 
 - [x] MCP server registered with stdio transport, discoverable by the agent
 - [x] `scan_imports` tool: given a directory path and a target library name (e.g., "pydantic"), returns a list of files that import it (using Python `ast` for speed)
@@ -13,3 +13,12 @@
 - [x] `get_node_context` tool: given a file path and a symbol name, returns the source code of that specific AST node (function, class) for isolated LLM processing
 - [x] Tests verify that formatting, comments, and whitespace are preserved through a round-trip parse → transform → write
 - [x] Tests verify the fast `ast` pre-filter correctly identifies files importing the target library
+
+## Implementation Notes
+
+- Implemented `mcp-server-ast` server in `src/mcp_servers/ast_server.py` using `libcst` and `mcp.server.mcpserver.MCPServer` with stdio transport.
+- Implemented `scan_imports` with fast Python `ast` pre-filtering ignoring `.venv`, `.git`, build directories, etc.
+- Implemented `extract_signatures` collecting class definitions, decorators, bases, and method details via `_SignatureCollector`.
+- Implemented `apply_transform` dynamically loading dotted `CSTTransformer` classes and applying formatting-preserving transformations.
+- Implemented `get_node_context` retrieving exact source code and line numbers for functions and classes via `_NodeContextFinder`.
+- Tested at the MCP tool interface seam in `tests/test_mcp_ast.py` (11 unit tests passed).
