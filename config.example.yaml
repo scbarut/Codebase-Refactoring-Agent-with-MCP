@@ -1,0 +1,31 @@
+# ==============================================================================
+# Autonomous Codebase Refactoring & Migration Agent — Preferences Configuration
+# Copy this file to config.yaml to customize runtime settings.
+# ==============================================================================
+
+# Isolated Agent Workspace path where repositories are cloned and modified
+# The user's original codebase is never modified in-place (ADR-0005)
+workspace_path: "~/.migration-agent/workspaces"
+
+# Tiered Model Routing (ADR-0001)
+# model_lite: handles LOW-risk transforms (simple renames, argument reordering)
+model_lite: "gemini/gemini-2.5-flash-lite"
+# model_default: handles MEDIUM/HIGH-risk transforms and no-rule LLM fallback
+model_default: "gemini/gemini-2.5-flash"
+
+# Self-Healing Loop settings
+# Maximum iterations per file when running unit tests in Sandbox
+max_healing_attempts: 3
+
+# Logging preferences
+log_level: "INFO"
+json_logs: true
+
+# API & Web addresses
+api_host: "0.0.0.0"
+api_port: 8000
+web_url: "http://localhost:3000"
+
+# Directories for rules and pre-indexed documentation corpus
+rules_dir: "src/rules"
+docs_corpus_dir: "src/docs_corpus"

@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: migration-agent-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: migration_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d migration_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api/Dockerfile
+    container_name: migration-agent-api
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/migration_agent
+      LOG_LEVEL: INFO
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Mount Docker socket to allow API to spawn Sandbox containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mount agent workspaces directory
+      - ~/.migration-agent:/root/.migration-agent
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: migration-agent-web
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/ || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  postgres_data:
+    driver: local
