@@ -258,6 +258,15 @@ class Item(BaseModel):
     # Extra import should be removed, ConfigDict added
     assert "Extra" not in v2
 
+    # Idempotency: re-applying to v2 output should produce no changes
+    v2_file = tmp_path / "config_v2.py"
+    v2_file.write_text(v2, encoding="utf-8")
+    data2 = await _apply(server, str(v2_file), transformer)
+    assert data2["modified"] is False, (
+        f"ConfigClassToModelConfigTransformer is NOT idempotent!\n"
+        f"--- Second-pass output ---\n{data2['transformed_code']}"
+    )
+
 
 # ── BaseSettings import ───────────────────────────────────────────────
 
@@ -300,6 +309,15 @@ class Settings(BaseSettings):
     assert "from pydantic import BaseModel" in v2
     # BaseSettings should be in its own pydantic_settings import
     assert "from pydantic_settings import BaseSettings" in v2
+
+    # Idempotency: re-applying to v2 output should produce no changes
+    v2_file = tmp_path / "settings_multi_v2.py"
+    v2_file.write_text(v2, encoding="utf-8")
+    data2 = await _apply(server, str(v2_file), transformer)
+    assert data2["modified"] is False, (
+        f"BaseSettingsImportTransformer (multi) is NOT idempotent!\n"
+        f"--- Second-pass output ---\n{data2['transformed_code']}"
+    )
 
 
 # ── Method renames ─────────────────────────────────────────────────────

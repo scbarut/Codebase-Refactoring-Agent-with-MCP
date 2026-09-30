@@ -16,6 +16,14 @@ from collections.abc import Sequence
 import libcst as cst
 import libcst.matchers as m
 
+# ── Shared matcher ─────────────────────────────────────────────────────
+
+# Matches ``from pydantic import ...`` or ``from pydantic.X import ...``.
+# Used by every transformer that touches pydantic imports.
+_PYDANTIC_IMPORT = m.ImportFrom(
+    module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic")
+)
+
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
@@ -77,7 +85,7 @@ class ValidatorToFieldValidatorTransformer(cst.CSTTransformer):
     # --- Import rewriting ---
 
     def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
-        if m.matches(node, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))) and isinstance(node.names, (list, tuple)):
+        if m.matches(node, _PYDANTIC_IMPORT) and isinstance(node.names, (list, tuple)):
             for alias in node.names:
                 if isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("validator")):
                     self._import_validator = True
@@ -85,7 +93,7 @@ class ValidatorToFieldValidatorTransformer(cst.CSTTransformer):
     def leave_ImportFrom(
         self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
     ) -> cst.ImportFrom:
-        if not m.matches(updated_node, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))):
+        if not m.matches(updated_node, _PYDANTIC_IMPORT):
             return updated_node
         if not isinstance(updated_node.names, (list, tuple)):
             return updated_node
@@ -185,7 +193,7 @@ class RootValidatorToModelValidatorTransformer(cst.CSTTransformer):
     def leave_ImportFrom(
         self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
     ) -> cst.ImportFrom:
-        if not m.matches(updated_node, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))):
+        if not m.matches(updated_node, _PYDANTIC_IMPORT):
             return updated_node
         if not isinstance(updated_node.names, (list, tuple)):
             return updated_node
@@ -391,7 +399,7 @@ class ConfigClassToModelConfigTransformer(cst.CSTTransformer):
         self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
     ) -> cst.ImportFrom:
         """Add ConfigDict to pydantic imports and remove Extra if present."""
-        if not m.matches(updated_node, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))):
+        if not m.matches(updated_node, _PYDANTIC_IMPORT):
             return updated_node
         if not isinstance(updated_node.names, (list, tuple)):
             return updated_node
@@ -435,7 +443,7 @@ class BaseSettingsImportTransformer(cst.CSTTransformer):
     def leave_ImportFrom(
         self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
     ) -> cst.ImportFrom | cst.FlattenSentinel[cst.BaseSmallStatement] | cst.RemovalSentinel:
-        if not m.matches(updated_node, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))):
+        if not m.matches(updated_node, _PYDANTIC_IMPORT):
             return updated_node
         if not isinstance(updated_node.names, (list, tuple)):
             return updated_node
@@ -451,9 +459,7 @@ class BaseSettingsImportTransformer(cst.CSTTransformer):
         # If BaseSettings is the only import, change the module entirely
         if len(updated_node.names) == 1:
             return updated_node.with_changes(
-                module=cst.Attribute(value=cst.Name("pydantic_settings"), attr=cst.Name("BaseSettings"))
-                if False  # We actually want to keep `from X import Y` form
-                else cst.Name("pydantic_settings"),
+                module=cst.Name("pydantic_settings"),
             )
 
         # If there are other imports, remove BaseSettings and we would need
@@ -485,9 +491,7 @@ class BaseSettingsImportTransformer(cst.CSTTransformer):
                 for item in stmt.body:
                     if (
                         isinstance(item, cst.ImportFrom)
-                        and m.matches(
-                            item, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))
-                        )
+                        and m.matches(item, _PYDANTIC_IMPORT)
                         and isinstance(item.names, (list, tuple))
                         and len(item.names) > 1
                     ):
@@ -515,7 +519,7 @@ class BaseSettingsImportTransformer(cst.CSTTransformer):
             if not inserted and isinstance(stmt, cst.SimpleStatementLine):
                 for item in stmt.body:
                     if isinstance(item, cst.ImportFrom) and m.matches(
-                        item, m.ImportFrom(module=m.Attribute(value=m.Name("pydantic")) | m.Name("pydantic"))
+                        item, _PYDANTIC_IMPORT
                     ):
                         new_import = cst.SimpleStatementLine(
                             body=[
@@ -554,6 +558,12 @@ class MethodRenameTransformer(cst.CSTTransformer):
 
     Handles both instance calls (``obj.dict()``) and class calls
     (``Model.parse_obj(data)``).
+
+    .. warning::
+        This transformer matches **any** ``.dict()``, ``.json()``, ``.copy()``
+        call, not just those on Pydantic models (static CST analysis cannot
+        resolve types).  False positives are possible on non-Pydantic objects.
+        Review output carefully for methods with common names.
     """
 
     def leave_Call(
