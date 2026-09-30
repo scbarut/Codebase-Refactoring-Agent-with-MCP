@@ -1,7 +1,6 @@
-"""Orchestration Graph — scan, plan, HITL Gateway.
+"""Orchestration Graph — scan, plan, HITL Gateway, resume, dispatch, aggregate.
 
-The first half of the LangGraph Orchestration Graph.  Given a
-``MigrationJobConfig``, the graph:
+The complete LangGraph Orchestration Graph driving the full Migration Job lifecycle:
 
 1. **ingest** — clones/copies the codebase into an Agent Workspace via
    ``mcp-server-git``.
@@ -10,13 +9,16 @@ The first half of the LangGraph Orchestration Graph.  Given a
 3. **build_plan** — loads matching Migration Rules, extracts affected AST
    nodes, calculates per-file risk, and assembles the Migration Plan.
 4. **hitl_gateway** — calls ``interrupt()``, pausing execution for human
-   review.  State is persisted via the configured checkpointer.
+   review. State is persisted via the configured checkpointer.
+5. **resume_from_hitl** — receives approved files, creates migration branch.
+6. **dispatch_file_subgraphs** — spawns nested File Sub-graph for each approved file.
+7. **aggregate_results** — builds ``MigrationResult`` with successes, failures, and stats.
+8. **commit_and_output** — commits successful files, generates diff and git apply commands.
 """
 
 from __future__ import annotations
 
 import ast
-import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
@@ -29,12 +31,17 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from src.core.config import load_config
+from src.core.file_subgraph import run_file_subgraph
 from src.core.logging import get_logger
+from src.core.mcp_client import call_mcp_tool
 from src.core.models import (
     AffectedNode,
     FilePlanEntry,
+    FileResult,
+    FileStatus,
     MatchedRule,
     MigrationGraphState,
+    MigrationResult,
     RiskLevel,
 )
 from src.mcp_servers.ast_server import create_ast_server
@@ -115,6 +122,21 @@ def _has_test_coverage(file_path: str, workspace_path: str) -> bool:
     return False
 
 
+# ── Git & MCP Helpers ──────────────────────────────────────────────────
+
+
+# Re-export shared helper for backward compatibility and internal graph calls
+_call_git_tool = call_mcp_tool
+
+
+def is_github_repo(source: str | None) -> bool:
+    """Return True if source points to a GitHub repository."""
+    if not source:
+        return False
+    src = source.strip().lower()
+    return "github.com" in src or src.startswith("git@github.com:")
+
+
 # ── Graph node functions ───────────────────────────────────────────────
 
 
@@ -124,7 +146,9 @@ async def ingest(state: MigrationGraphState) -> dict[str, Any]:
     Calls ``mcp-server-git`` ``clone_repo`` and populates workspace
     metadata into the graph state.
     """
-    git_server = create_git_server()
+    git_server = state.get("git_server")
+    if git_server is None:
+        git_server = create_git_server()
 
     call_args: dict[str, Any] = {"source": state["source"]}
     # Prefer workspace_base_dir from state (useful for tests), then config
@@ -134,16 +158,15 @@ async def ingest(state: MigrationGraphState) -> dict[str, Any]:
         config = load_config()
         call_args["workspace_base_dir"] = str(config.resolved_workspace_path)
 
-    result = await git_server.call_tool("clone_repo", call_args)
-    data = json.loads(result.content[0].text)
+    data = await _call_git_tool(git_server, "clone_repo", call_args)
 
     job_id = state.get("job_id") or str(uuid.uuid4())
 
     logger.info(
         "Ingest complete",
         job_id=job_id,
-        workspace_path=data["workspace_path"],
-        repo_name=data["repo_name"],
+        workspace_path=data.get("workspace_path"),
+        repo_name=data.get("repo_name"),
     )
 
     # Resolve rule set path for the target library
@@ -153,9 +176,9 @@ async def ingest(state: MigrationGraphState) -> dict[str, Any]:
         "job_id": job_id,
         "source": state["source"],
         "target_library": state["target_library"],
-        "workspace_path": data["workspace_path"],
-        "repo_name": data["repo_name"],
-        "base_branch": data["base_branch"],
+        "workspace_path": data.get("workspace_path", ""),
+        "repo_name": data.get("repo_name", ""),
+        "base_branch": data.get("base_branch", "main"),
         "rule_set_path": rule_set_path,
     }
 
@@ -166,16 +189,20 @@ async def scan(state: MigrationGraphState) -> dict[str, Any]:
     Calls ``mcp-server-ast`` ``scan_imports`` and stores the list of
     relative file paths that matched.
     """
-    ast_server = create_ast_server()
+    ast_server = state.get("ast_server")
+    if ast_server is None:
+        ast_server = create_ast_server()
 
-    result = await ast_server.call_tool(
+    data = await call_mcp_tool(
+        ast_server,
         "scan_imports",
         {
             "directory_path": state["workspace_path"],
             "target_library": state["target_library"],
         },
     )
-    data = json.loads(result.content[0].text)
+    if not isinstance(data, dict):
+        data = {"count": 0, "relative_files": []}
 
     logger.info(
         "Scan complete",
@@ -323,10 +350,13 @@ async def _build_file_plan_entry(
 
     # Extract signatures to find affected nodes
     try:
-        sig_result = await ast_server.call_tool(
-            "extract_signatures", {"file_path": abs_path_str}
+        sig_data = await call_mcp_tool(
+            ast_server,
+            "extract_signatures",
+            {"file_path": abs_path_str},
         )
-        sig_data = json.loads(sig_result.content[0].text)
+        if not isinstance(sig_data, dict):
+            sig_data = {"classes": [], "functions": []}
     except Exception:  # noqa: BLE001
         logger.warning(
             "Could not extract signatures",
@@ -393,7 +423,9 @@ async def build_plan(state: MigrationGraphState) -> dict[str, Any]:
     - matches rules against the imported symbols,
     - calculates a per-file risk (max rule risk, bumped +1 if no test coverage).
     """
-    ast_server = create_ast_server()
+    ast_server = state.get("ast_server")
+    if ast_server is None:
+        ast_server = create_ast_server()
     rules = load_rules(state["rule_set_path"])
     workspace_path = state["workspace_path"]
     scanned_files = state["scanned_files"]
@@ -458,6 +490,343 @@ def hitl_gateway(state: MigrationGraphState) -> dict[str, Any]:
     return {"approved_files": [e["file_path"] for e in plan]}
 
 
+async def resume_from_hitl(state: MigrationGraphState) -> dict[str, Any]:
+    """Resume execution after human approval at the HITL Gateway.
+
+    Receives the approved file list, normalizes it, creates a migration branch
+    in the workspace via ``mcp-server-git``, and prepares state for dispatch.
+    """
+    raw_approved = state.get("approved_files")
+    plan = state.get("migration_plan", [])
+
+    if raw_approved is None:
+        approved_files = [e["file_path"] for e in plan]
+    else:
+        approved_files = []
+        for item in raw_approved:
+            if isinstance(item, str):
+                approved_files.append(item)
+            elif isinstance(item, dict) and "file_path" in item:
+                approved_files.append(item["file_path"])
+            elif hasattr(item, "file_path"):
+                approved_files.append(str(item.file_path))
+
+    workspace_path = state.get("workspace_path")
+    target_library = state.get("target_library", "migration")
+    git_server = state.get("git_server")
+    if git_server is None:
+        git_server = create_git_server()
+
+    branch_name = state.get("branch_name")
+    if not branch_name and workspace_path:
+        try:
+            res = await _call_git_tool(
+                git_server,
+                "create_branch",
+                {
+                    "workspace_path": workspace_path,
+                    "target_library": target_library,
+                },
+            )
+            branch_name = res.get("branch_name")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not create git branch", error=str(exc))
+            branch_name = f"migrate/{target_library}"
+
+    logger.info(
+        "Resumed from HITL Gateway",
+        job_id=state.get("job_id"),
+        approved_count=len(approved_files),
+        branch_name=branch_name,
+    )
+
+    return {
+        "approved_files": approved_files,
+        "branch_name": branch_name or "",
+        "file_results": [],
+    }
+
+
+async def dispatch_file_subgraphs(state: MigrationGraphState) -> dict[str, Any]:
+    """Spawn a File Sub-graph for each approved file sequentially.
+
+    Collects a ``FileResult`` for each file while maintaining episodic
+    context isolation across runs.
+    """
+    approved_files = state.get("approved_files", [])
+    workspace_path = state.get("workspace_path", "")
+    target_library = state.get("target_library", "")
+    plan_by_path = {e["file_path"]: e for e in state.get("migration_plan", [])}
+    custom_runner = state.get("file_subgraph_runner")
+
+    file_results: list[dict[str, Any]] = []
+
+    logger.info(
+        "Dispatching File Sub-graphs",
+        job_id=state.get("job_id"),
+        file_count=len(approved_files),
+    )
+
+    for rel_file in approved_files:
+        plan_entry = plan_by_path.get(rel_file, {})
+        matched_rules = plan_entry.get("matched_rules", [])
+        risk = plan_entry.get("risk", RiskLevel.LOW)
+
+        try:
+            if custom_runner is not None:
+                res = await custom_runner(
+                    file_path=rel_file,
+                    workspace_path=workspace_path,
+                    target_library=target_library,
+                    matched_rules=matched_rules,
+                    risk=risk,
+                    sandbox_manager=state.get("sandbox_manager"),
+                    sandbox_container=state.get("sandbox_container"),
+                    ast_server=state.get("ast_server"),
+                    docs_server=state.get("docs_server"),
+                    llm_client=state.get("llm_client"),
+                )
+            else:
+                res = await run_file_subgraph(
+                    file_path=rel_file,
+                    workspace_path=workspace_path,
+                    target_library=target_library,
+                    matched_rules=matched_rules,
+                    risk=risk,
+                    sandbox_manager=state.get("sandbox_manager"),
+                    sandbox_container=state.get("sandbox_container"),
+                    ast_server=state.get("ast_server"),
+                    docs_server=state.get("docs_server"),
+                    llm_client=state.get("llm_client"),
+                )
+
+            if isinstance(res, FileResult):
+                res_dict = res.model_dump()
+            elif isinstance(res, dict):
+                res_dict = res
+            else:
+                res_dict = FileResult(
+                    file_path=rel_file,
+                    status=getattr(res, "status", FileStatus.SUCCESS),
+                    diff=getattr(res, "diff", ""),
+                    traceback=getattr(res, "traceback", ""),
+                    attempt_count=getattr(res, "attempt_count", 0),
+                ).model_dump()
+
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "File Sub-graph dispatch failed unexpectedly",
+                file=rel_file,
+                error=str(exc),
+            )
+            res_dict = FileResult(
+                file_path=rel_file,
+                status=FileStatus.FAILED,
+                diff="",
+                traceback=f"Error executing File Sub-graph: {exc}",
+                attempt_count=0,
+            ).model_dump()
+
+        file_results.append(res_dict)
+        logger.info(
+            "File Sub-graph completed",
+            file=rel_file,
+            status=res_dict.get("status"),
+            attempts=res_dict.get("attempt_count", 0),
+        )
+
+    return {"file_results": file_results}
+
+
+async def aggregate_results(state: MigrationGraphState) -> dict[str, Any]:
+    """Aggregate per-file results into a MigrationResult.
+
+    Partitions files into successes and failures, compiles diffs,
+    tracebacks, and summary statistics.
+    """
+    file_results = state.get("file_results", [])
+    successful_files: list[dict[str, Any]] = []
+    failed_files: list[dict[str, Any]] = []
+    total_healing = 0
+
+    for fr in file_results:
+        status_val = fr.get("status")
+        if isinstance(status_val, FileStatus):
+            status_str = status_val.value
+        else:
+            status_str = str(status_val).upper()
+
+        if status_str == "SUCCESS":
+            successful_files.append(fr)
+        else:
+            failed_files.append(fr)
+
+        total_healing += fr.get("attempt_count", 0)
+
+    total_count = len(file_results)
+    success_count = len(successful_files)
+    failure_count = len(failed_files)
+
+    migration_result = MigrationResult(
+        job_id=state.get("job_id", ""),
+        target_library=state.get("target_library", ""),
+        total_files=total_count,
+        successful_files=[FileResult(**f) for f in successful_files],
+        failed_files=[FileResult(**f) for f in failed_files],
+        success_count=success_count,
+        failure_count=failure_count,
+        total_healing_attempts=total_healing,
+        full_diff="",
+        git_commands={},
+    )
+
+    logger.info(
+        "Aggregated migration results",
+        job_id=state.get("job_id"),
+        total=total_count,
+        successes=success_count,
+        failures=failure_count,
+        healing_attempts=total_healing,
+    )
+
+    return {"migration_result": migration_result.model_dump()}
+
+
+async def commit_and_output(state: MigrationGraphState) -> dict[str, Any]:
+    """Commit successful files via mcp-server-git and generate git output commands.
+
+    Produces:
+    1. Git commits for each successfully migrated file.
+    2. Unified diff of all modifications on the migration branch.
+    3. Copy-pasteable git commands for local repository application.
+    4. Optional PR creation command for GitHub repositories.
+    """
+    file_results = state.get("file_results", [])
+    workspace_path = state.get("workspace_path", "")
+    target_library = state.get("target_library", "target library")
+    base_branch = state.get("base_branch") or "main"
+    branch_name = state.get("branch_name")
+    source = state.get("source", "")
+    is_github = is_github_repo(source)
+
+    git_server = state.get("git_server")
+    if git_server is None:
+        git_server = create_git_server()
+
+    # 1. Commit each successful file
+    successful_files = [
+        f
+        for f in file_results
+        if (
+            f.get("status") == FileStatus.SUCCESS
+            or str(f.get("status")).upper() == "SUCCESS"
+        )
+    ]
+
+    for sf in successful_files:
+        rel_file = sf["file_path"]
+        commit_msg = f"Migrate {rel_file} to {target_library}"
+        try:
+            await _call_git_tool(
+                git_server,
+                "commit_file",
+                {
+                    "workspace_path": workspace_path,
+                    "file_path": rel_file,
+                    "message": commit_msg,
+                },
+            )
+            logger.info("Committed migrated file", file=rel_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not commit file via git server", file=rel_file, error=str(exc)
+            )
+
+    # 2. Generate full diff
+    full_diff = ""
+    try:
+        diff_res = await _call_git_tool(
+            git_server,
+            "generate_diff",
+            {
+                "workspace_path": workspace_path,
+                "base_branch": base_branch,
+            },
+        )
+        full_diff = diff_res.get("diff", "")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not generate diff via git server", error=str(exc))
+
+    if not full_diff and successful_files:
+        # Fallback: assemble unified diffs from individual file results
+        file_diffs = [f.get("diff", "") for f in successful_files if f.get("diff")]
+        full_diff = "\n".join(file_diffs)
+
+    # 3. Generate copy-pasteable git commands
+    git_commands: dict[str, Any] = {}
+    try:
+        cmd_res = await _call_git_tool(
+            git_server,
+            "get_apply_commands",
+            {
+                "workspace_path": workspace_path,
+                "branch_name": branch_name,
+                "original_path": source,
+            },
+        )
+        git_commands = cmd_res
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not get apply commands via git server", error=str(exc))
+        clean_path = str(workspace_path).replace("\\", "/")
+        b_name = branch_name or f"migrate/{target_library}"
+        git_commands = {
+            "workspace_path": clean_path,
+            "branch_name": b_name,
+            "remote_name": "migration-agent",
+            "original_path": source,
+            "commands": [
+                f'git remote add migration-agent "{clean_path}"',
+                "git fetch migration-agent",
+                f"git merge migration-agent/{b_name}",
+            ],
+            "one_liner": f'git remote add migration-agent "{clean_path}" && git fetch migration-agent && git merge migration-agent/{b_name}',
+            "patch_command": f'git -C "{clean_path}" format-patch -1 HEAD --stdout | git apply --check',
+        }
+
+    # 4. Optional PR command for GitHub-sourced repos
+    pr_command = None
+    if is_github:
+        b_name = git_commands.get(
+            "branch_name", branch_name or f"migrate/{target_library}"
+        )
+        pr_command = (
+            f'gh pr create --title "Migrate to {target_library}" '
+            f'--body "Automated migration using Autonomous Codebase Refactoring & Migration Agent." '
+            f"--base {base_branch} --head {b_name}"
+        )
+
+    git_commands["is_github"] = is_github
+    git_commands["pr_command"] = pr_command
+
+    # 5. Update migration_result with full_diff and git_commands
+    mig_result = dict(state.get("migration_result", {}))
+    mig_result["full_diff"] = full_diff
+    mig_result["git_commands"] = git_commands
+
+    logger.info(
+        "Job completed and git commands generated",
+        job_id=state.get("job_id"),
+        is_github=is_github,
+        has_pr_command=bool(pr_command),
+        diff_length=len(full_diff),
+    )
+
+    return {
+        "migration_result": mig_result,
+        "git_commands": git_commands,
+    }
+
+
 # ── Graph assembly ─────────────────────────────────────────────────────
 
 
@@ -473,12 +842,20 @@ def build_orchestration_graph() -> StateGraph:
     builder.add_node("scan", scan)
     builder.add_node("build_plan", build_plan)
     builder.add_node("hitl_gateway", hitl_gateway)
+    builder.add_node("resume_from_hitl", resume_from_hitl)
+    builder.add_node("dispatch_file_subgraphs", dispatch_file_subgraphs)
+    builder.add_node("aggregate_results", aggregate_results)
+    builder.add_node("commit_and_output", commit_and_output)
 
     builder.add_edge(START, "ingest")
     builder.add_edge("ingest", "scan")
     builder.add_edge("scan", "build_plan")
     builder.add_edge("build_plan", "hitl_gateway")
-    builder.add_edge("hitl_gateway", END)
+    builder.add_edge("hitl_gateway", "resume_from_hitl")
+    builder.add_edge("resume_from_hitl", "dispatch_file_subgraphs")
+    builder.add_edge("dispatch_file_subgraphs", "aggregate_results")
+    builder.add_edge("aggregate_results", "commit_and_output")
+    builder.add_edge("commit_and_output", END)
 
     return builder
 

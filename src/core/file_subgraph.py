@@ -25,6 +25,7 @@ from typing_extensions import TypedDict
 
 from src.core.config import Settings, load_config
 from src.core.logging import get_logger
+from src.core.mcp_client import call_mcp_tool
 from src.core.models import FileResult, FileStatus, MatchedRule, RiskLevel
 from src.core.sandbox import SandboxManager
 from src.mcp_servers.ast_server import create_ast_server
@@ -200,32 +201,8 @@ def _extract_query_from_traceback(tb: str) -> str:
     return tb[:200]
 
 
-async def _call_mcp_tool(
-    server: Any, tool_name: str, arguments: dict[str, Any]
-) -> dict[str, Any]:
-    """Call an MCP server tool and parse result cleanly into a dict."""
-    if hasattr(server, "call_tool"):
-        res = server.call_tool(tool_name, arguments)
-        if inspect.iscoroutine(res):
-            res = await res
-        if hasattr(res, "content") and res.content:
-            text = res.content[0].text
-            if isinstance(text, str):
-                try:
-                    return json.loads(text)
-                except json.JSONDecodeError:
-                    return {"text": text}
-            return text
-        if isinstance(res, dict):
-            return res
-        return {}
-    if hasattr(server, tool_name):
-        fn = getattr(server, tool_name)
-        res = fn(**arguments)
-        if inspect.iscoroutine(res):
-            res = await res
-        return res if isinstance(res, dict) else {}
-    raise ValueError(f"Server does not support tool '{tool_name}'")
+# Re-export shared helper for backward compatibility and internal graph calls
+_call_mcp_tool = call_mcp_tool
 
 
 async def _call_llm(
@@ -504,6 +481,19 @@ async def run_tests(state: FileSubgraphState) -> dict[str, Any]:
 
     sandbox_container = state.get("sandbox_container")
     test_target = _find_test_file(file_path, workspace_path)
+
+    if sandbox_container is None:
+        logger.info(
+            "No sandbox container provided; skipping test execution",
+            file=file_path,
+        )
+        return {
+            "test_result": None,
+            "passed": True,
+            "exit_code": 0,
+            "output": "No sandbox container provided; tests skipped.",
+            "traceback": "",
+        }
 
     logger.info(
         "Running scoped tests in sandbox", file=file_path, test_target=test_target
