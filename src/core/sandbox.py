@@ -1,0 +1,335 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import docker.errors
+from docker.models.containers import Container
+
+import docker
+from src.core.logging import get_logger
+
+logger = get_logger(__name__)
+
+DEFAULT_SANDBOX_IMAGE_PREFIX = "ghcr.io/scbarut/migration-sandbox"
+DEFAULT_DOCKERFILE_PATH = Path("docker/sandbox/Dockerfile")
+
+
+@dataclass
+class TestResult:
+    """Structured result of running pytest inside the Sandbox."""
+
+    __test__ = False
+    passed: bool
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+    traceback: str = ""
+    output: str = ""
+
+
+@dataclass
+class InstallResult:
+    """Structured result of dependency installation inside the Sandbox."""
+
+    has_deps: bool
+    command: str | None = None
+    exit_code: int = 0
+    output: str = ""
+
+
+class SandboxManager:
+    """Manages the per-job Docker Sandbox container lifecycle.
+
+    Responsibilities:
+    - Checks for (and pulls or builds) the multi-version Python Sandbox base image.
+    - Spins up a fresh container per Migration Job with Agent Workspace mounted.
+    - Detects and installs project dependencies (requirements.txt, pyproject.toml, setup.py).
+    - Runs scoped pytest executions targeting specific modules.
+    - Extracts structured test outputs and tracebacks.
+    - Destroys containers cleanly when jobs complete.
+    """
+
+    def __init__(
+        self,
+        docker_client: docker.DockerClient | None = None,
+        dockerfile_path: Path | str | None = None,
+        image_prefix: str = DEFAULT_SANDBOX_IMAGE_PREFIX,
+    ) -> None:
+        self._client = docker_client
+        self.image_prefix = image_prefix
+        if dockerfile_path is not None:
+            self.dockerfile_path = Path(dockerfile_path).resolve()
+        else:
+            self.dockerfile_path = Path(DEFAULT_DOCKERFILE_PATH).resolve()
+
+    @property
+    def client(self) -> docker.DockerClient:
+        """Lazily initialize Docker client if not injected."""
+        if self._client is None:
+            self._client = docker.from_env()
+        return self._client
+
+    def get_image_tag(self, python_version: str = "3.11") -> str:
+        """Return the fully-qualified image tag for the specified Python version."""
+        cleaned_version = python_version.strip().lstrip("v")
+        return f"{self.image_prefix}:py{cleaned_version}"
+
+    def ensure_image(self, python_version: str = "3.11") -> str:
+        """Check for image locally, pull if available from registry, or build from Dockerfile.
+
+        Returns the confirmed image tag.
+        """
+        image_tag = self.get_image_tag(python_version)
+
+        # 1. Check if image exists locally
+        try:
+            self.client.images.get(image_tag)
+            logger.info("sandbox_image_found_locally", image=image_tag)
+            return image_tag
+        except docker.errors.ImageNotFound:
+            logger.info("sandbox_image_not_local_attempting_pull", image=image_tag)
+        except docker.errors.DockerException as e:
+            logger.warning("sandbox_image_check_failed", image=image_tag, error=str(e))
+
+        # 2. Try pulling from remote registry (GHCR)
+        try:
+            logger.info("sandbox_image_pulling", image=image_tag)
+            self.client.images.pull(image_tag)
+            logger.info("sandbox_image_pulled_successfully", image=image_tag)
+            return image_tag
+        except (docker.errors.ImageNotFound, docker.errors.APIError, docker.errors.DockerException) as pull_err:
+            logger.info(
+                "sandbox_image_pull_failed_building_local",
+                image=image_tag,
+                reason=str(pull_err),
+            )
+
+        # 3. Build from Dockerfile
+        cleaned_version = python_version.strip().lstrip("v")
+        context_dir = self.dockerfile_path.parent
+        dockerfile_rel_or_name = self.dockerfile_path.name
+
+        logger.info(
+            "sandbox_image_building",
+            dockerfile=str(self.dockerfile_path),
+            python_version=cleaned_version,
+            tag=image_tag,
+        )
+
+        build_args = {"PYTHON_VERSION": cleaned_version}
+        self.client.images.build(
+            path=str(context_dir),
+            dockerfile=dockerfile_rel_or_name,
+            buildargs=build_args,
+            tag=image_tag,
+            rm=True,
+        )
+        logger.info("sandbox_image_built_successfully", image=image_tag)
+        return image_tag
+
+    def create_sandbox(
+        self,
+        workspace_path: Path | str,
+        python_version: str = "3.11",
+    ) -> Container:
+        """Spins up a fresh container per Migration Job with Agent Workspace mounted read-write.
+
+        Args:
+            workspace_path: Path to the Agent Workspace on the host.
+            python_version: Target Python version (e.g. '3.11', '3.10').
+
+        Returns:
+            The started Docker Container instance.
+        """
+        image_tag = self.ensure_image(python_version=python_version)
+        resolved_workspace = Path(workspace_path).resolve()
+
+        if not resolved_workspace.exists():
+            raise FileNotFoundError(f"Workspace path does not exist: {resolved_workspace}")
+
+        volume_mount = {
+            str(resolved_workspace): {
+                "bind": "/workspace",
+                "mode": "rw",
+            }
+        }
+
+        logger.info(
+            "creating_sandbox_container",
+            workspace=str(resolved_workspace),
+            image=image_tag,
+        )
+
+        container = self.client.containers.run(
+            image_tag,
+            command=["tail", "-f", "/dev/null"],
+            detach=True,
+            working_dir="/workspace",
+            volumes=volume_mount,
+            labels={
+                "managed-by": "migration-agent",
+                "python-version": python_version,
+                "workspace": str(resolved_workspace),
+            },
+        )
+
+        logger.info("sandbox_container_created", container_id=container.id[:12])
+        return container
+
+    def install_deps(
+        self,
+        container: Container,
+        workspace_path: Path | str | None = None,
+    ) -> InstallResult:
+        """Detects requirements.txt, pyproject.toml, or setup.py and runs pip install inside the container.
+
+        Args:
+            container: Running Sandbox container.
+            workspace_path: Optional host path to check for dependency files. If not provided,
+                           checks inside the container's /workspace.
+
+        Returns:
+            InstallResult detailing executed command and output.
+        """
+        cmd = None
+        has_reqs = False
+        has_pyproj = False
+        has_setup = False
+
+        if workspace_path is not None:
+            wpath = Path(workspace_path).resolve()
+            has_reqs = (wpath / "requirements.txt").is_file()
+            has_pyproj = (wpath / "pyproject.toml").is_file()
+            has_setup = (wpath / "setup.py").is_file()
+        else:
+            # Check inside container
+            res_reqs = container.exec_run("test -f /workspace/requirements.txt")
+            has_reqs = (res_reqs.exit_code == 0)
+            if not has_reqs:
+                res_pyproj = container.exec_run("test -f /workspace/pyproject.toml")
+                has_pyproj = (res_pyproj.exit_code == 0)
+            if not has_reqs and not has_pyproj:
+                res_setup = container.exec_run("test -f /workspace/setup.py")
+                has_setup = (res_setup.exit_code == 0)
+
+        if has_reqs:
+            cmd = "pip install --no-cache-dir -r requirements.txt"
+        elif has_pyproj or has_setup:
+            cmd = "pip install --no-cache-dir ."
+        else:
+            logger.info("sandbox_no_deps_detected")
+            return InstallResult(has_deps=False, command=None, exit_code=0, output="No dependencies found.")
+
+        logger.info("sandbox_installing_deps", command=cmd, container_id=container.id[:12])
+        exec_res = container.exec_run(cmd, workdir="/workspace", demux=True)
+
+        stdout_bytes, stderr_bytes = exec_res.output if isinstance(exec_res.output, tuple) else (exec_res.output, b"")
+        stdout_str = (stdout_bytes or b"").decode("utf-8", errors="replace")
+        stderr_str = (stderr_bytes or b"").decode("utf-8", errors="replace")
+        combined_output = f"{stdout_str}\n{stderr_str}".strip()
+
+        logger.info(
+            "sandbox_deps_installed",
+            exit_code=exec_res.exit_code,
+            command=cmd,
+        )
+
+        return InstallResult(
+            has_deps=True,
+            command=cmd,
+            exit_code=exec_res.exit_code,
+            output=combined_output,
+        )
+
+    def run_tests(
+        self,
+        container: Container,
+        module_path: str | Path | None = None,
+    ) -> TestResult:
+        """Executes pytest targeting the specified module with structured output.
+
+        Args:
+            container: Running Sandbox container.
+            module_path: Path to module or test file (e.g. 'tests/test_rules.py').
+                        If None, runs pytest on all tests.
+
+        Returns:
+            TestResult containing pass/fail status, exit code, and extracted traceback.
+        """
+        if module_path:
+            posix_path = Path(module_path).as_posix()
+            cmd = f"pytest {posix_path} --tb=long -q"
+        else:
+            cmd = "pytest --tb=long -q"
+
+        logger.info("sandbox_running_tests", command=cmd, container_id=container.id[:12])
+        exec_res = container.exec_run(cmd, workdir="/workspace", demux=True)
+
+        stdout_bytes, stderr_bytes = exec_res.output if isinstance(exec_res.output, tuple) else (exec_res.output, b"")
+        stdout_str = (stdout_bytes or b"").decode("utf-8", errors="replace")
+        stderr_str = (stderr_bytes or b"").decode("utf-8", errors="replace")
+        combined_output = f"{stdout_str}\n{stderr_str}".strip()
+
+        passed = (exec_res.exit_code == 0)
+        traceback_text = ""
+        if not passed:
+            traceback_text = self._extract_traceback(stdout_str, stderr_str)
+
+        logger.info(
+            "sandbox_tests_completed",
+            passed=passed,
+            exit_code=exec_res.exit_code,
+            command=cmd,
+        )
+
+        return TestResult(
+            passed=passed,
+            exit_code=exec_res.exit_code,
+            stdout=stdout_str,
+            stderr=stderr_str,
+            traceback=traceback_text,
+            output=combined_output,
+        )
+
+    def _extract_traceback(self, stdout: str, stderr: str) -> str:
+        """Extracts the traceback section from pytest output for the Self-Healing Loop."""
+        combined = f"{stdout}\n{stderr}"
+
+        # Look for the FAILURES section in pytest
+        if "=== FAILURES ===" in combined:
+            parts = combined.split("=== FAILURES ===", 1)
+            failure_section = parts[1]
+            return f"=== FAILURES ===\n{failure_section.strip()}"
+
+        # Look for standard Python traceback
+        if "Traceback (most recent call last):" in combined:
+            idx = combined.find("Traceback (most recent call last):")
+            return combined[idx:].strip()
+
+        # If pytest failed during collection or syntax error
+        match = re.search(r"(ERROR|FAILED).*$", combined, re.MULTILINE)
+        if match:
+            return combined[match.start() :].strip()
+
+        return combined.strip()
+
+    def destroy_sandbox(self, container: Container) -> None:
+        """Stops and removes the Sandbox container cleanly."""
+        try:
+            container_id = getattr(container, "id", "unknown")[:12]
+            logger.info("sandbox_destroying_container", container_id=container_id)
+            try:
+                container.stop(timeout=5)
+            except docker.errors.DockerException as e:
+                logger.debug("sandbox_container_stop_warning", error=str(e))
+
+            try:
+                container.remove(force=True)
+            except docker.errors.DockerException as e:
+                logger.debug("sandbox_container_remove_warning", error=str(e))
+
+            logger.info("sandbox_container_destroyed", container_id=container_id)
+        except docker.errors.DockerException as e:
+            logger.warning("sandbox_destroy_failed", error=str(e))

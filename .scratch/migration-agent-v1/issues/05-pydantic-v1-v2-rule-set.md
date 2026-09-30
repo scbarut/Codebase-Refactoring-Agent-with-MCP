@@ -4,12 +4,13 @@
 
 **Blocked by:** 03 (mcp-server-ast)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] YAML rule file at `src/rules/pydantic_v1_to_v2.yaml` with entries for all common mechanical rewrites
-- [ ] Rules cover at minimum: `@validator` → `@field_validator`, `@root_validator` → `@model_validator`, `class Config` → `model_config = ConfigDict(...)`, `from pydantic import BaseSettings` → `from pydantic_settings import BaseSettings`, `.dict()` → `.model_dump()`, `.json()` → `.model_dump_json()`, `.parse_obj()` → `.model_validate()`, `.parse_raw()` → `.model_validate_json()`
-- [ ] Each YAML rule entry includes: `old_qualified_name`, `new_qualified_name`, `risk` (LOW/MEDIUM/HIGH), `doc_ref`, and optionally `transformer_class` (dotted path to a Python CSTTransformer)
-- [ ] Python `CSTTransformer` classes for complex patterns (e.g., `Config` class → `model_config` dict conversion, `@validator` argument rewriting with `mode='before'`/`mode='wrap'`)
-- [ ] Doc Corpus at `src/docs_corpus/pydantic-v1-to-v2/` with markdown sections extracted from the official Pydantic v2 migration guide, each section addressable by the `doc_ref` in the rules
-- [ ] Tests feed sample v1 files (covering each rule) through `mcp-server-ast` and verify correct v2 output
-- [ ] Tests verify that formatting and comments are preserved in the rewritten output
+- [x] YAML rule file at `src/rules/pydantic_v1_to_v2.yaml` with entries for all common mechanical rewrites
+- [x] Rules cover at minimum: `@validator` → `@field_validator`, `@root_validator` → `@model_validator`, `class Config` → `model_config = ConfigDict(...)`, `from pydantic import BaseSettings` → `from pydantic_settings import BaseSettings`, `.dict()` → `.model_dump()`, `.json()` → `.model_dump_json()`, `.parse_obj()` → `.model_validate()`, `.parse_raw()` → `.model_validate_json()`
+- [x] Each YAML rule entry includes: `old_qualified_name`, `new_qualified_name`, `risk` (LOW/MEDIUM/HIGH), `doc_ref`, and optionally `transformer_class` (dotted path to a Python CSTTransformer)
+- [x] Python `CSTTransformer` classes for complex patterns (e.g., `Config` class → `model_config` dict conversion, `@validator` argument rewriting with `mode='before'`/`mode='wrap'`)
+- [x] Doc Corpus at `src/docs_corpus/pydantic-v1-to-v2/` with markdown sections extracted from the official Pydantic v2 migration guide, each section addressable by the `doc_ref` in the rules
+- [x] Tests feed sample v1 files (covering each rule) through `mcp-server-ast` and verify correct v2 output
+- [x] Tests verify that formatting and comments are preserved in the rewritten output
+

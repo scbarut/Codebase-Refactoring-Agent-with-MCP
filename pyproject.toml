@@ -59,3 +59,7 @@ dev = [
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 asyncio_mode = "auto"
+markers = [
+    "docker: marks tests requiring a running Docker daemon",
+]
+
