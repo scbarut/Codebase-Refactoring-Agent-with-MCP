@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api.routes.jobs import router as jobs_router
 from src.core.config import load_config
 from src.core.logging import get_logger, setup_logging
 
@@ -38,6 +39,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Register Migration Jobs REST & WebSocket router
+app.include_router(jobs_router, prefix="/api/jobs", tags=["jobs"])
 
 
 @app.middleware("http")
