@@ -29,14 +29,19 @@ The API container mounts the host Docker socket (`/var/run/docker.sock`) to dyna
 
 ### 2. Configuration
 
-Copy the example environment and config files:
+Before running the agent, initialize your local environment and preferences from the provided examples:
 
 ```bash
+# Copy secret environment variables
 cp .env.example .env
+
+# Copy runtime preferences configuration
 cp config.example.yaml config.yaml
 ```
 
-Set your `GEMINI_API_KEY` in `.env`.
+- **Set API Keys in `.env`:** Provide your `GEMINI_API_KEY` (or `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` if using other providers).
+- **Configure Models in `config.yaml`:** The system uses **LiteLLM** for tiered routing. You can use Google Gemini by default (`gemini/gemini-2.5-flash`), or easily switch to any provider (e.g. `openai/gpt-4o`, `anthropic/claude-3-5-sonnet-20241022`, `groq/llama-3.1-70b-versatile`, or local `ollama/qwen2.5-coder:14b`).
+
 
 ### 3. Start the Stack
 

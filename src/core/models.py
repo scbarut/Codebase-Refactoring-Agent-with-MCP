@@ -80,6 +80,31 @@ class FilePlanEntry(BaseModel):
     risk: RiskLevel = RiskLevel.LOW
 
 
+class FileStatus(str, Enum):
+    """Execution status for a file rewritten by the File Sub-graph."""
+
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+class FileResult(BaseModel):
+    """Final result of processing a single file in the File Sub-graph.
+
+    Attributes:
+        file_path: Relative path to the file in the workspace.
+        status: SUCCESS or FAILED.
+        diff: Unified diff of modifications if successful.
+        traceback: Last failure traceback if tests failed.
+        attempt_count: Number of self-healing attempts performed (0 to 3).
+    """
+
+    file_path: str
+    status: FileStatus
+    diff: str = ""
+    traceback: str = ""
+    attempt_count: int = 0
+
+
 from typing_extensions import TypedDict
 
 

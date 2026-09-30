@@ -8,10 +8,20 @@
 workspace_path: "~/.migration-agent/workspaces"
 
 # Tiered Model Routing (ADR-0001)
+# Powered by LiteLLM: You can use any provider (Gemini, OpenAI, Anthropic, Groq, Ollama, etc.)
+# Format: "<provider>/<model-name>"
+# Examples:
+#   Google:    "gemini/gemini-2.5-flash", "gemini/gemini-2.5-flash-lite"
+#   OpenAI:    "openai/gpt-4o", "openai/gpt-4o-mini"
+#   Anthropic: "anthropic/claude-3-5-sonnet-20241022", "anthropic/claude-3-haiku-20240307"
+#   Groq:      "groq/llama-3.1-70b-versatile", "groq/llama-3.1-8b-instant"
+#   Ollama:    "ollama/qwen2.5-coder:14b", "ollama/llama3.2" (offline/local)
+#
 # model_lite: handles LOW-risk transforms (simple renames, argument reordering)
-model_lite: "gemini/gemini-2.5-flash-lite"
+model_lite: "gemini/gemini-3.5-flash-lite"
 # model_default: handles MEDIUM/HIGH-risk transforms and no-rule LLM fallback
-model_default: "gemini/gemini-2.5-flash"
+model_default: "gemini/gemini-3.5-flash"
+
 
 # Self-Healing Loop settings
 # Maximum iterations per file when running unit tests in Sandbox
