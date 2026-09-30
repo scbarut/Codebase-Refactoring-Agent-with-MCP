@@ -1,9 +1,11 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { Navbar } from "@/components/Navbar";
 
 export const metadata: Metadata = {
   title: "Migration Agent — Autonomous Code Modernization",
-  description: "Autonomous Codebase Refactoring & Migration Agent with Model Context Protocol",
+  description:
+    "Autonomous Codebase Refactoring & Migration Agent with Model Context Protocol and Human-in-the-Loop Gateway",
 };
 
 export default function RootLayout({
@@ -14,17 +16,8 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <nav className="navbar">
-          <div className="brand">
-            <span>⚡</span>
-            <span>Migration Agent</span>
-          </div>
-          <div className="status-badge">
-            <span className="pulse-dot"></span>
-            <span>Stack Online</span>
-          </div>
-        </nav>
-        <main>{children}</main>
+        <Navbar />
+        <main className="main-content">{children}</main>
       </body>
     </html>
   );
