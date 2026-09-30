@@ -1,0 +1,112 @@
+# Pydantic V1 → V2 Migration Rule Set
+# Each rule defines a mechanical rewrite pattern.
+# Complex patterns reference a CSTTransformer via transformer_class.
+
+migration: pydantic-v1-to-v2
+version: "1.0"
+
+rules:
+  # ── Decorator Rewrites ──────────────────────────────────────────────
+
+  - id: validator-to-field-validator
+    old_qualified_name: pydantic.validator
+    new_qualified_name: pydantic.field_validator
+    risk: MEDIUM
+    doc_ref: validator-to-field-validator
+    transformer_class: src.rules.pydantic_transformers.ValidatorToFieldValidatorTransformer
+    description: >
+      Rewrites @validator to @field_validator, adds @classmethod,
+      and converts pre=True to mode='before'.
+
+  - id: root-validator-to-model-validator
+    old_qualified_name: pydantic.root_validator
+    new_qualified_name: pydantic.model_validator
+    risk: HIGH
+    doc_ref: root-validator-to-model-validator
+    transformer_class: src.rules.pydantic_transformers.RootValidatorToModelValidatorTransformer
+    description: >
+      Rewrites @root_validator to @model_validator(mode='after'),
+      adjusting method signature from (cls, values) to (self) -> Self.
+
+  # ── Config Class Rewrite ────────────────────────────────────────────
+
+  - id: config-class-to-model-config
+    old_qualified_name: Config
+    new_qualified_name: model_config
+    risk: HIGH
+    doc_ref: config-class-to-model-config
+    transformer_class: src.rules.pydantic_transformers.ConfigClassToModelConfigTransformer
+    description: >
+      Converts inner class Config to model_config = ConfigDict(...),
+      mapping renamed attributes (orm_mode → from_attributes, etc.).
+
+  # ── Import Rewrites ────────────────────────────────────────────────
+
+  - id: basesettings-to-pydantic-settings
+    old_qualified_name: pydantic.BaseSettings
+    new_qualified_name: pydantic_settings.BaseSettings
+    risk: LOW
+    doc_ref: basesettings-moved-to-pydantic-settings
+    transformer_class: src.rules.pydantic_transformers.BaseSettingsImportTransformer
+    description: >
+      Moves BaseSettings import from pydantic to pydantic_settings.
+
+  # ── Method Rename Rewrites ─────────────────────────────────────────
+
+  - id: dict-to-model-dump
+    old_qualified_name: BaseModel.dict
+    new_qualified_name: BaseModel.model_dump
+    risk: LOW
+    doc_ref: basemodel-methods-v2
+    transformer_class: src.rules.pydantic_transformers.MethodRenameTransformer
+    description: >
+      Renames .dict() calls to .model_dump().
+
+  - id: json-to-model-dump-json
+    old_qualified_name: BaseModel.json
+    new_qualified_name: BaseModel.model_dump_json
+    risk: LOW
+    doc_ref: basemodel-methods-v2
+    transformer_class: src.rules.pydantic_transformers.MethodRenameTransformer
+    description: >
+      Renames .json() calls to .model_dump_json().
+
+  - id: parse-obj-to-model-validate
+    old_qualified_name: BaseModel.parse_obj
+    new_qualified_name: BaseModel.model_validate
+    risk: LOW
+    doc_ref: basemodel-methods-v2
+    transformer_class: src.rules.pydantic_transformers.MethodRenameTransformer
+    description: >
+      Renames .parse_obj() calls to .model_validate().
+
+  - id: parse-raw-to-model-validate-json
+    old_qualified_name: BaseModel.parse_raw
+    new_qualified_name: BaseModel.model_validate_json
+    risk: LOW
+    doc_ref: basemodel-methods-v2
+    transformer_class: src.rules.pydantic_transformers.MethodRenameTransformer
+    description: >
+      Renames .parse_raw() calls to .model_validate_json().
+
+  # ── Field Argument Rewrites ────────────────────────────────────────
+
+  - id: field-regex-to-pattern
+    old_qualified_name: pydantic.Field.regex
+    new_qualified_name: pydantic.Field.pattern
+    risk: LOW
+    doc_ref: field-regex-to-pattern
+    transformer_class: src.rules.pydantic_transformers.FieldRegexToPatternTransformer
+    description: >
+      Renames the regex= argument of Field() to pattern=.
+
+  # ── Generic Model Rewrite ──────────────────────────────────────────
+
+  - id: genericmodel-to-basemodel
+    old_qualified_name: pydantic.generics.GenericModel
+    new_qualified_name: pydantic.BaseModel
+    risk: MEDIUM
+    doc_ref: genericmodel-deprecated
+    transformer_class: src.rules.pydantic_transformers.GenericModelToBaseModelTransformer
+    description: >
+      Replaces GenericModel inheritance with BaseModel + Generic[T].
