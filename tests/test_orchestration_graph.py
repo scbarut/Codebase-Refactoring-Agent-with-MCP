@@ -16,9 +16,11 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
 from src.core.graph import (
+    _build_file_plan_entry,
     _bump_risk,
     _has_test_coverage,
     _max_risk,
+    _rule_matches_file,
     build_orchestration_graph,
     compile_orchestration_graph,
     get_async_postgres_saver,
@@ -63,11 +65,33 @@ def _make_sample_codebase(root: Path) -> Path:
 
 
 def _make_uncovered_codebase(root: Path) -> Path:
-    """Codebase with a pydantic file but NO matching test file."""
+    """Codebase with a pydantic file using validator (MEDIUM risk) but NO matching test file."""
     root.mkdir(parents=True, exist_ok=True)
     (root / "api.py").write_text(
-        "from pydantic import BaseModel\n\nclass Item(BaseModel):\n    price: float\n",
+        "from pydantic import BaseModel, validator\n\n"
+        "class Item(BaseModel):\n"
+        "    price: float\n\n"
+        "    @validator('price')\n"
+        "    def validate_price(cls, v):\n"
+        "        return v\n",
         encoding="utf-8",
+    )
+    return root
+
+
+def _make_low_risk_codebase(root: Path) -> Path:
+    """Codebase with a pydantic file using only BaseSettings (LOW risk) and covered by test."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "settings.py").write_text(
+        "from pydantic import BaseSettings\n\n"
+        "class AppSettings(BaseSettings):\n"
+        "    database_url: str = 'localhost'\n",
+        encoding="utf-8",
+    )
+    tests_dir = root / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test_settings.py").write_text(
+        "def test_settings():\n    pass\n", encoding="utf-8"
     )
     return root
 
@@ -175,17 +199,16 @@ async def test_graph_produces_plan_and_pauses(tmp_path: Path):
     entry = plan[0]
     assert entry["file_path"] == "models.py"
 
-    # Matched rules should be present
-    assert len(entry["matched_rules"]) > 0
-    rule_ids = {r["rule_id"] for r in entry["matched_rules"]}
-    assert "validator-to-field-validator" in rule_ids
+    # Only the matched rule for this file should be present (validator, not config or root_validator)
+    assert len(entry["matched_rules"]) == 1
+    assert entry["matched_rules"][0]["rule_id"] == "validator-to-field-validator"
 
     # Affected nodes should include UserModel class and validate_name method
     node_names = {n["symbol_name"] for n in entry["affected_nodes"]}
     assert "UserModel" in node_names
 
-    # Risk should not be bumped because test_models.py exists
-    assert entry["risk"] in ("LOW", "MEDIUM", "HIGH")
+    # Risk should not be bumped because test_models.py exists; base risk is MEDIUM
+    assert entry["risk"] == "MEDIUM"
 
 
 @pytest.mark.asyncio
@@ -224,9 +247,9 @@ async def test_graph_risk_bumped_without_test_coverage(tmp_path: Path):
     entry = plan[0]
     assert entry["file_path"] == "api.py"
 
-    # The pydantic rules include HIGH-risk rules (root-validator, config-class).
-    # Max rule risk across all rules is HIGH.
-    # No test coverage → bump HIGH → still HIGH (capped).
+    # Matched rule is validator (MEDIUM). Without test coverage, MEDIUM bumps to HIGH.
+    assert len(entry["matched_rules"]) == 1
+    assert entry["matched_rules"][0]["rule_id"] == "validator-to-field-validator"
     assert entry["risk"] == "HIGH"
 
 
@@ -379,3 +402,144 @@ class TestPostgresSaverConfig:
                 assert saver is mock_saver
                 mock_saver.setup.assert_awaited_once()
             mock_from_conn.assert_called_once_with(custom_url)
+
+
+# ── Tests for specific rule filtering and low-risk isolation ───────────
+
+
+@pytest.mark.asyncio
+async def test_graph_file_with_low_risk_patterns_only(tmp_path: Path):
+    """A file with only low-risk patterns must only match low-risk rules and keep LOW risk."""
+    source = _make_low_risk_codebase(tmp_path / "source")
+    checkpointer = InMemorySaver()
+    graph = compile_orchestration_graph(checkpointer=checkpointer)
+
+    thread_id = "test-thread-low-risk"
+    config = {"configurable": {"thread_id": thread_id}}
+
+    initial_state: dict[str, Any] = {
+        "source": str(source),
+        "target_library": "pydantic",
+        "workspace_base_dir": str(tmp_path / "workspaces"),
+        "workspace_path": "",
+        "job_id": "",
+        "repo_name": "",
+        "base_branch": "",
+        "scanned_files": [],
+        "migration_plan": [],
+        "approved_files": [],
+        "rule_set_path": "",
+    }
+
+    events = []
+    async for event in graph.astream(initial_state, config):
+        events.append(event)
+
+    last_event = events[-1]
+    assert "__interrupt__" in last_event
+    plan = last_event["__interrupt__"][0].value["plan"]
+    assert len(plan) == 1
+    entry = plan[0]
+    assert entry["file_path"] == "settings.py"
+
+    # Must ONLY contain the low-risk basesettings rule
+    rule_ids = {r["rule_id"] for r in entry["matched_rules"]}
+    assert rule_ids == {"basesettings-to-pydantic-settings"}
+
+    # Must NOT have any high or medium risk rules assigned
+    assert all(r["risk"] == "LOW" for r in entry["matched_rules"])
+    assert "config-class-to-model-config" not in rule_ids
+    assert "root-validator-to-model-validator" not in rule_ids
+    assert "validator-to-field-validator" not in rule_ids
+
+    # With test coverage, final risk stays LOW
+    assert entry["risk"] == "LOW"
+
+
+class TestRuleMatching:
+    def test_rule_matches_decorator(self):
+        rule = {
+            "id": "validator-to-field-validator",
+            "old_qualified_name": "pydantic.validator",
+            "new_qualified_name": "pydantic.field_validator",
+            "risk": "MEDIUM",
+        }
+        code = "from pydantic import BaseModel, validator\nclass U(BaseModel):\n @validator('x')\n def f(cls, v): return v\n"
+        assert _rule_matches_file(rule, code) is True
+
+    def test_rule_matches_inner_class_config(self):
+        rule = {
+            "id": "config-class-to-model-config",
+            "old_qualified_name": "Config",
+            "new_qualified_name": "model_config",
+            "risk": "HIGH",
+        }
+        code = "from pydantic import BaseModel\nclass U(BaseModel):\n class Config:\n  orm_mode = True\n"
+        assert _rule_matches_file(rule, code) is True
+
+    def test_rule_matches_method_call(self):
+        rule = {
+            "id": "dict-to-model-dump",
+            "old_qualified_name": "BaseModel.dict",
+            "new_qualified_name": "BaseModel.model_dump",
+            "risk": "LOW",
+        }
+        code = "user = User()\ndata = user.dict(exclude_unset=True)\n"
+        assert _rule_matches_file(rule, code) is True
+
+    def test_rule_matches_field_regex(self):
+        rule = {
+            "id": "field-regex-to-pattern",
+            "old_qualified_name": "pydantic.Field.regex",
+            "new_qualified_name": "pydantic.Field.pattern",
+            "risk": "LOW",
+        }
+        code = "from pydantic import BaseModel, Field\nclass M(BaseModel):\n x: str = Field(..., regex='^[a-z]+$')\n"
+        assert _rule_matches_file(rule, code) is True
+
+    def test_rule_does_not_match_unrelated_code(self):
+        rule = {
+            "id": "config-class-to-model-config",
+            "old_qualified_name": "Config",
+            "new_qualified_name": "model_config",
+            "risk": "HIGH",
+        }
+        code = "from pydantic import BaseModel\nclass Simple(BaseModel):\n name: str\n"
+        assert _rule_matches_file(rule, code) is False
+
+
+@pytest.mark.asyncio
+async def test_build_file_plan_entry_isolated(tmp_path: Path):
+    """Verify _build_file_plan_entry builds an isolated plan entry with only matching rules."""
+    from src.mcp_servers.ast_server import create_ast_server
+
+    file_path = tmp_path / "models.py"
+    file_path.write_text(
+        "from pydantic import BaseSettings\n\nclass Config(BaseSettings):\n    host: str = 'localhost'\n",
+        encoding="utf-8",
+    )
+    rules = [
+        {
+            "id": "basesettings-to-pydantic-settings",
+            "old_qualified_name": "pydantic.BaseSettings",
+            "new_qualified_name": "pydantic_settings.BaseSettings",
+            "risk": "LOW",
+        },
+        {
+            "id": "validator-to-field-validator",
+            "old_qualified_name": "pydantic.validator",
+            "new_qualified_name": "pydantic.field_validator",
+            "risk": "MEDIUM",
+        },
+    ]
+    ast_server = create_ast_server()
+    entry = await _build_file_plan_entry(
+        rel_file="models.py",
+        workspace_path=str(tmp_path),
+        rules=rules,
+        ast_server=ast_server,
+    )
+    # Only basesettings matched, validator did not
+    assert len(entry.matched_rules) == 1
+    assert entry.matched_rules[0].rule_id == "basesettings-to-pydantic-settings"
+    assert entry.matched_rules[0].risk == RiskLevel.LOW
