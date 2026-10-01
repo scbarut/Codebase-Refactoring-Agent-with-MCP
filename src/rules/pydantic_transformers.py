@@ -75,12 +75,58 @@ class ValidatorToFieldValidatorTransformer(cst.CSTTransformer):
     """Rewrite ``@validator(...)`` to ``@field_validator(...)``
     and add ``@classmethod`` if missing.  Converts ``pre=True``
     to ``mode='before'`` and removes ``always=True``.
+    If the field being validated has constraints in Field(...) (e.g. gt=0),
+    adds mode='before' so the custom validator runs before core constraints reject it.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._import_validator = False
         self._needs_field_validator_import = False
+        self._constrained_stack: list[set[str]] = []
+
+    def visit_ClassDef(self, node: cst.ClassDef) -> bool | None:
+        current_fields: set[str] = set()
+        if isinstance(node.body, cst.IndentedBlock):
+            for stmt in node.body.body:
+                if isinstance(stmt, cst.SimpleStatementLine):
+                    for small in stmt.body:
+                        field_name = None
+                        field_val = None
+                        if isinstance(small, cst.AnnAssign) and isinstance(small.target, cst.Name):
+                            field_name = small.target.value
+                            field_val = small.value
+                        elif isinstance(small, cst.Assign) and len(small.targets) == 1 and isinstance(small.targets[0].target, cst.Name):
+                            field_name = small.targets[0].target.value
+                            field_val = small.value
+
+                        if field_name and isinstance(field_val, cst.Call):
+                            func = field_val.func
+                            if (isinstance(func, cst.Name) and func.value == "Field") or (
+                                isinstance(func, cst.Attribute) and func.attr.value == "Field"
+                            ):
+                                kw_names = {
+                                    k.keyword.value
+                                    for k in field_val.args
+                                    if k.keyword is not None
+                                }
+                                constraint_keywords = {
+                                    "gt", "ge", "lt", "le",
+                                    "min_length", "max_length",
+                                    "min_items", "max_items",
+                                    "multiple_of", "regex", "pattern",
+                                }
+                                if kw_names & constraint_keywords:
+                                    current_fields.add(field_name)
+        self._constrained_stack.append(current_fields)
+        return True
+
+    def leave_ClassDef(
+        self, original_node: cst.ClassDef, updated_node: cst.ClassDef
+    ) -> cst.ClassDef:
+        if self._constrained_stack:
+            self._constrained_stack.pop()
+        return updated_node
 
     # --- Import rewriting ---
 
@@ -132,22 +178,43 @@ class ValidatorToFieldValidatorTransformer(cst.CSTTransformer):
                 call = dec.decorator
                 assert isinstance(call, cst.Call)
 
+                validated_fields: list[str] = []
+                for a in call.args:
+                    if a.keyword is None and isinstance(a.value, (cst.SimpleString, cst.FormattedString)):
+                        val_str = (
+                            a.value.evaluated_value
+                            if hasattr(a.value, "evaluated_value")
+                            else a.value.value.strip("\"'")
+                        )
+                        validated_fields.append(val_str)
+
                 new_args, pre_arg = _remove_arg_by_keyword(list(call.args), "pre")
                 new_args, _ = _remove_arg_by_keyword(new_args, "always")
 
-                # If pre=True was present, add mode='before'
+                # If pre=True was present or field has core constraints, add mode='before'
+                active_constrained = (
+                    set().union(*self._constrained_stack)
+                    if self._constrained_stack
+                    else set()
+                )
+                needs_before = False
                 if pre_arg is not None:
                     val = _arg_value_str(pre_arg)
                     if val == "True":
-                        mode_arg = cst.Arg(
-                            keyword=cst.Name("mode"),
-                            value=cst.SimpleString("'before'"),
-                            equal=cst.AssignEqual(
-                                whitespace_before=cst.SimpleWhitespace(""),
-                                whitespace_after=cst.SimpleWhitespace(""),
-                            ),
-                        )
-                        new_args.append(mode_arg)
+                        needs_before = True
+                elif any(f in active_constrained for f in validated_fields):
+                    needs_before = True
+
+                if needs_before:
+                    mode_arg = cst.Arg(
+                        keyword=cst.Name("mode"),
+                        value=cst.SimpleString("'before'"),
+                        equal=cst.AssignEqual(
+                            whitespace_before=cst.SimpleWhitespace(""),
+                            whitespace_after=cst.SimpleWhitespace(""),
+                        ),
+                    )
+                    new_args.append(mode_arg)
 
                 new_args = _fix_trailing_commas(new_args)
 
@@ -183,12 +250,108 @@ class ValidatorToFieldValidatorTransformer(cst.CSTTransformer):
 # ── 2. @root_validator → @model_validator ──────────────────────────────
 
 
+class _ValuesToSelfTransformer(cst.CSTTransformer):
+    """Rewrite accesses to the V1 root_validator 'values' dict to 'self' attribute accesses."""
+
+    def __init__(self, values_name: str) -> None:
+        super().__init__()
+        self.values_name = values_name
+
+    def leave_Call(
+        self, original_node: cst.Call, updated_node: cst.Call
+    ) -> cst.BaseExpression:
+        # Match values.get("field") or values.get('field', default)
+        if (
+            isinstance(updated_node.func, cst.Attribute)
+            and isinstance(updated_node.func.value, cst.Name)
+            and updated_node.func.value.value == self.values_name
+            and updated_node.func.attr.value == "get"
+            and updated_node.args
+        ):
+            first_arg = updated_node.args[0].value
+            if isinstance(first_arg, (cst.SimpleString, cst.FormattedString)):
+                attr_name = (
+                    first_arg.evaluated_value
+                    if hasattr(first_arg, "evaluated_value")
+                    else first_arg.value.strip("\"'")
+                )
+                if attr_name.isidentifier():
+                    return cst.Attribute(
+                        value=cst.Name("self"),
+                        attr=cst.Name(attr_name),
+                    )
+        return updated_node
+
+    def leave_Subscript(
+        self, original_node: cst.Subscript, updated_node: cst.Subscript
+    ) -> cst.BaseExpression:
+        # Match values["field"]
+        if (
+            isinstance(updated_node.value, cst.Name)
+            and updated_node.value.value == self.values_name
+            and isinstance(updated_node.slice, (list, tuple))
+            and len(updated_node.slice) == 1
+        ):
+            idx = updated_node.slice[0].slice
+            if isinstance(idx, cst.Index) and isinstance(idx.value, (cst.SimpleString, cst.FormattedString)):
+                attr_name = (
+                    idx.value.evaluated_value
+                    if hasattr(idx.value, "evaluated_value")
+                    else idx.value.value.strip("\"'")
+                )
+                if attr_name.isidentifier():
+                    return cst.Attribute(
+                        value=cst.Name("self"),
+                        attr=cst.Name(attr_name),
+                    )
+            elif isinstance(idx, (cst.SimpleString, cst.FormattedString)):
+                attr_name = (
+                    idx.evaluated_value
+                    if hasattr(idx, "evaluated_value")
+                    else idx.value.strip("\"'")
+                )
+                if attr_name.isidentifier():
+                    return cst.Attribute(
+                        value=cst.Name("self"),
+                        attr=cst.Name(attr_name),
+                    )
+        return updated_node
+
+    def leave_Return(
+        self, original_node: cst.Return, updated_node: cst.Return
+    ) -> cst.Return:
+        if (
+            isinstance(updated_node.value, cst.Name)
+            and updated_node.value.value == self.values_name
+        ):
+            return updated_node.with_changes(value=cst.Name("self"))
+        return updated_node
+
+
 class RootValidatorToModelValidatorTransformer(cst.CSTTransformer):
     """Rewrite ``@root_validator`` to ``@model_validator(mode='after')``.
 
     For ``@root_validator(pre=True)`` → ``@model_validator(mode='before')``.
-    Adjusts the import statement accordingly.
+    Adjusts the import statement and method signature/body accordingly.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._root_validator_methods: dict[str, str] = {}
+
+    def visit_FunctionDef(self, node: cst.FunctionDef) -> bool | None:
+        for dec in node.decorators:
+            if m.matches(dec, m.Decorator(decorator=m.Name("root_validator"))):
+                self._root_validator_methods[node.name.value] = "after"
+            elif m.matches(dec, m.Decorator(decorator=m.Call(func=m.Name("root_validator")))):
+                call = dec.decorator
+                assert isinstance(call, cst.Call)
+                _, pre_arg = _remove_arg_by_keyword(list(call.args), "pre")
+                if pre_arg is not None and _arg_value_str(pre_arg) == "True":
+                    self._root_validator_methods[node.name.value] = "before"
+                else:
+                    self._root_validator_methods[node.name.value] = "after"
+        return True
 
     def leave_ImportFrom(
         self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
@@ -262,6 +425,74 @@ class RootValidatorToModelValidatorTransformer(cst.CSTTransformer):
                 args=new_args,
             )
             return updated_node.with_changes(decorator=new_call)
+
+        return updated_node
+
+    def leave_FunctionDef(
+        self, original_node: cst.FunctionDef, updated_node: cst.FunctionDef
+    ) -> cst.FunctionDef:
+        fn_name = original_node.name.value
+        if fn_name not in self._root_validator_methods:
+            return updated_node
+
+        mode = self._root_validator_methods[fn_name]
+
+        if mode == "after":
+            # 1. Update params to (self)
+            orig_params = original_node.params.params
+            values_var_name = "values"
+            if len(orig_params) >= 2:
+                values_var_name = orig_params[1].name.value
+
+            new_params = updated_node.params.with_changes(
+                params=[cst.Param(name=cst.Name("self"))]
+            )
+
+            # 2. Update return type from dict to "Self" if present
+            new_returns = updated_node.returns
+            if new_returns is not None:
+                ret_str = ""
+                if isinstance(new_returns.annotation, cst.Name):
+                    ret_str = new_returns.annotation.value
+                elif isinstance(new_returns.annotation, cst.Subscript) and isinstance(new_returns.annotation.value, cst.Name):
+                    ret_str = new_returns.annotation.value.value
+                if ret_str in ("dict", "Dict"):
+                    new_returns = cst.Annotation(annotation=cst.SimpleString('"Self"'))
+
+            # 3. Transform body to replace values accesses with self
+            val_trans = _ValuesToSelfTransformer(values_var_name)
+            new_body = updated_node.body.visit(val_trans)
+
+            # 4. Ensure @classmethod is removed for mode='after'
+            new_decorators = [
+                d for d in updated_node.decorators
+                if not m.matches(d, m.Decorator(decorator=m.Name("classmethod")))
+            ]
+
+            return updated_node.with_changes(
+                params=new_params,
+                returns=new_returns,
+                body=new_body,
+                decorators=new_decorators,
+            )
+
+        if mode == "before":
+            # In V2, mode='before' requires @classmethod
+            has_classmethod = any(
+                m.matches(d, m.Decorator(decorator=m.Name("classmethod")))
+                for d in updated_node.decorators
+            )
+            if not has_classmethod:
+                classmethod_dec = cst.Decorator(
+                    decorator=cst.Name("classmethod"),
+                    leading_lines=[],
+                )
+                final_decorators: list[cst.Decorator] = []
+                for dec in updated_node.decorators:
+                    final_decorators.append(dec)
+                    if m.matches(dec, m.Decorator(decorator=m.Call(func=m.Name("model_validator")))):
+                        final_decorators.append(classmethod_dec)
+                return updated_node.with_changes(decorators=final_decorators)
 
         return updated_node
 

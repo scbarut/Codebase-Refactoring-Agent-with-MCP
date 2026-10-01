@@ -1,0 +1,20 @@
+# Celery 4 → 5 Migration Rule Set
+migration: celery-v4-to-v5
+version: "1.0"
+
+rules:
+  - id: task-to-shared-task
+    old_qualified_name: celery.task
+    new_qualified_name: celery.shared_task
+    risk: MEDIUM
+    doc_ref: celery/celery-5.0-migration.md#shared-task
+    description: >
+      Migrates deprecated @task and @app.task decorators to standard @shared_task.
+
+  - id: celery-lowercase-settings
+    old_qualified_name: CELERY_BROKER_URL
+    new_qualified_name: broker_url
+    risk: LOW
+    doc_ref: celery/celery-5.0-migration.md#lowercase-settings
+    description: >
+      Modernizes uppercase Celery settings (CELERY_BROKER_URL, CELERY_RESULT_BACKEND) to 5.0 lowercase equivalents.

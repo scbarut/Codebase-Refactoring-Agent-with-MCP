@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import re
+import socket
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,6 +132,39 @@ class SandboxManager:
         logger.info("sandbox_image_built_successfully", image=image_tag)
         return image_tag
 
+    def _translate_to_host_path(self, container_path: Path | str) -> str:
+        """Translate a container-internal path to the corresponding host path for sibling container volume mounts (DooD)."""
+        c_path = str(Path(container_path).resolve()).replace("\\", "/")
+
+        try:
+            current_container = None
+            hostname = socket.gethostname()
+            for identifier in (hostname, "migration-agent-api"):
+                try:
+                    current_container = self.client.containers.get(identifier)
+                    break
+                except Exception:  # noqa: BLE001, S112
+                    continue
+
+            if current_container is not None:
+                mounts = current_container.attrs.get("Mounts", [])
+                for mount in mounts:
+                    dest = mount.get("Destination", "").replace("\\", "/")
+                    source = mount.get("Source", "")
+                    if dest and (c_path == dest or c_path.startswith(dest + "/")):
+                        rel = c_path[len(dest):].lstrip("/")
+                        # If the host source is a Windows path (e.g. C:\Users\...)
+                        if "\\" in source or (len(source) > 1 and source[1] == ":"):
+                            host_rel = rel.replace("/", "\\")
+                            sep = "\\"
+                            clean_src = source.rstrip(sep)
+                            return f"{clean_src}{sep}{host_rel}" if host_rel else source
+                        return f"{source.rstrip('/')}/{rel}" if rel else source
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Failed to translate container path to host path", error=str(exc))
+
+        return str(container_path)
+
     def create_sandbox(
         self,
         workspace_path: Path | str,
@@ -149,8 +185,10 @@ class SandboxManager:
         if not resolved_workspace.exists():
             raise FileNotFoundError(f"Workspace path does not exist: {resolved_workspace}")
 
+        host_workspace = self._translate_to_host_path(resolved_workspace)
+
         volume_mount = {
-            str(resolved_workspace): {
+            host_workspace: {
                 "bind": "/workspace",
                 "mode": "rw",
             }
@@ -158,7 +196,7 @@ class SandboxManager:
 
         logger.info(
             "creating_sandbox_container",
-            workspace=str(resolved_workspace),
+            workspace=host_workspace,
             image=image_tag,
         )
 
@@ -175,13 +213,49 @@ class SandboxManager:
             },
         )
 
-        logger.info("sandbox_container_created", container_id=container.id[:12])
+        logger.info("sandbox_container_created", container_id=getattr(container, "id", "")[:12])
         return container
+
+    @asynccontextmanager
+    async def managed_sandbox(
+        self,
+        workspace_path: Path | str,
+        target_library: str | None = None,
+        python_version: str = "3.11",
+    ) -> AsyncIterator[Container | None]:
+        """Async context manager that provisions, configures, and safely tears down a Sandbox container.
+
+        Gracefully degrades by yielding None if Docker is unavailable or errors occur during startup.
+        Guarantees container cleanup upon exit.
+        """
+        container: Container | None = None
+        try:
+            container = self.create_sandbox(
+                workspace_path=workspace_path,
+                python_version=python_version,
+            )
+            self.install_deps(
+                container,
+                workspace_path=workspace_path,
+                target_library=target_library,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sandbox_lifecycle_init_failed", error=str(exc))
+            if container is not None:
+                self.destroy_sandbox(container)
+                container = None
+
+        try:
+            yield container
+        finally:
+            if container is not None:
+                self.destroy_sandbox(container)
 
     def install_deps(
         self,
         container: Container,
         workspace_path: Path | str | None = None,
+        target_library: str | None = None,
     ) -> InstallResult:
         """Detects requirements.txt, pyproject.toml, or setup.py and runs pip install inside the container.
 
@@ -189,6 +263,8 @@ class SandboxManager:
             container: Running Sandbox container.
             workspace_path: Optional host path to check for dependency files. If not provided,
                            checks inside the container's /workspace.
+            target_library: Optional target library specifier (e.g. 'pydantic>=2.0' or 'pydantic')
+                            to upgrade inside the sandbox for migration verification.
 
         Returns:
             InstallResult detailing executed command and output.
@@ -218,28 +294,62 @@ class SandboxManager:
             cmd = "pip install --no-cache-dir -r requirements.txt"
         elif has_pyproj or has_setup:
             cmd = "pip install --no-cache-dir ."
-        else:
+
+        combined_output = ""
+        exit_code = 0
+
+        if cmd is not None:
+            logger.info("sandbox_installing_deps", command=cmd, container_id=container.id[:12])
+            exec_res = container.exec_run(
+                cmd,
+                workdir="/workspace",
+                environment={"PYTHONPATH": "/workspace"},
+                demux=True,
+            )
+            stdout_bytes, stderr_bytes = (
+                exec_res.output if isinstance(exec_res.output, tuple) else (exec_res.output, b"")
+            )
+            stdout_str = (stdout_bytes or b"").decode("utf-8", errors="replace")
+            stderr_str = (stderr_bytes or b"").decode("utf-8", errors="replace")
+            combined_output = f"{stdout_str}\n{stderr_str}".strip()
+            exit_code = exec_res.exit_code
+
+        # Upgrade target library if requested
+        if target_library:
+            target_cmd = f"pip install --no-cache-dir --upgrade {target_library}"
+            logger.info("sandbox_upgrading_target_library", command=target_cmd, container_id=container.id[:12])
+            exec_target = container.exec_run(
+                target_cmd,
+                workdir="/workspace",
+                environment={"PYTHONPATH": "/workspace"},
+                demux=True,
+            )
+            t_out, t_err = (
+                exec_target.output if isinstance(exec_target.output, tuple) else (exec_target.output, b"")
+            )
+            t_out_str = (t_out or b"").decode("utf-8", errors="replace")
+            t_err_str = (t_err or b"").decode("utf-8", errors="replace")
+            target_output = f"{t_out_str}\n{t_err_str}".strip()
+
+            combined_output = f"{combined_output}\n{target_output}".strip() if combined_output else target_output
+            cmd = f"{cmd} && {target_cmd}" if cmd else target_cmd
+            if exit_code == 0:
+                exit_code = exec_target.exit_code
+
+        if not cmd:
             logger.info("sandbox_no_deps_detected")
             return InstallResult(has_deps=False, command=None, exit_code=0, output="No dependencies found.")
 
-        logger.info("sandbox_installing_deps", command=cmd, container_id=container.id[:12])
-        exec_res = container.exec_run(cmd, workdir="/workspace", demux=True)
-
-        stdout_bytes, stderr_bytes = exec_res.output if isinstance(exec_res.output, tuple) else (exec_res.output, b"")
-        stdout_str = (stdout_bytes or b"").decode("utf-8", errors="replace")
-        stderr_str = (stderr_bytes or b"").decode("utf-8", errors="replace")
-        combined_output = f"{stdout_str}\n{stderr_str}".strip()
-
         logger.info(
             "sandbox_deps_installed",
-            exit_code=exec_res.exit_code,
+            exit_code=exit_code,
             command=cmd,
         )
 
         return InstallResult(
             has_deps=True,
             command=cmd,
-            exit_code=exec_res.exit_code,
+            exit_code=exit_code,
             output=combined_output,
         )
 
@@ -260,12 +370,17 @@ class SandboxManager:
         """
         if module_path:
             posix_path = Path(module_path).as_posix()
-            cmd = f"pytest {posix_path} --tb=long -q"
+            cmd = f"python -m pytest {posix_path} --tb=long -q"
         else:
-            cmd = "pytest --tb=long -q"
+            cmd = "python -m pytest --tb=long -q"
 
         logger.info("sandbox_running_tests", command=cmd, container_id=container.id[:12])
-        exec_res = container.exec_run(cmd, workdir="/workspace", demux=True)
+        exec_res = container.exec_run(
+            cmd,
+            workdir="/workspace",
+            environment={"PYTHONPATH": "/workspace"},
+            demux=True,
+        )
 
         stdout_bytes, stderr_bytes = exec_res.output if isinstance(exec_res.output, tuple) else (exec_res.output, b"")
         stdout_str = (stdout_bytes or b"").decode("utf-8", errors="replace")

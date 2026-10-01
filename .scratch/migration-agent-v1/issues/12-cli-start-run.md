@@ -4,7 +4,7 @@
 
 **Blocked by:** 10 (FastAPI API)
 
-**Status:** ready-for-human
+**Status:** done
 
 - [x] `migration-agent start`: runs `docker compose up -d`, waits for all services to be healthy, opens the default browser to the Dashboard URL (e.g., `http://localhost:3000`)
 - [x] `migration-agent stop`: runs `docker compose down` cleanly

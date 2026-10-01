@@ -79,6 +79,76 @@ def _clean_html_artifacts(text: str) -> str:
     return clean_text
 
 
+def _normalize_search_query(query: str, target_library: str | None = None) -> tuple[str, str]:
+    """Clean and optimize a query and target library for dynamic web/doc search.
+
+    Removes local file paths, extracts the primary error line from tracebacks,
+    sanitizes target library version tags (e.g. 'celery_v4_to_v5' -> 'celery migration v4 to v5'),
+    and forms a clean, context-rich search query across arbitrary library versions.
+    """
+    clean_query = query.strip()
+
+    # 1. Clean target library and extract version migration context
+    clean_lib = ""
+    migration_hint = ""
+    if target_library:
+        raw_lib = target_library.strip()
+        # Check patterns like "name-v1-to-v2" or "name_v4_to_v5"
+        m_trans = re.search(r"([a-zA-Z0-9]+)[_\-](v?\d+)[_\-]to[_\-](v?\d+)", raw_lib, re.IGNORECASE)
+        if m_trans:
+            clean_lib = m_trans.group(1)
+            migration_hint = f"{m_trans.group(2)} to {m_trans.group(3)} migration"
+        else:
+            # Check version constraints like "celery>=5.0,<6.0" or "pydantic>=2.0"
+            m_ver = re.match(r"([a-zA-Z0-9_\-]+)([><=~^].*)?", raw_lib)
+            if m_ver:
+                clean_lib = m_ver.group(1).replace("-", " ").replace("_", " ").strip()
+                ver_spec = m_ver.group(2) or ""
+                digits = re.findall(r"\d+(?:\.\d+)?", ver_spec)
+                if digits:
+                    migration_hint = f"v{digits[0]} migration"
+            else:
+                clean_lib = raw_lib
+
+    # 2. Extract error if multiline or traceback
+    lines = clean_query.splitlines()
+    if len(lines) > 1 or "Traceback" in clean_query or "File " in clean_query:
+        error_lines = [
+            line.strip().lstrip("E ").strip()
+            for line in lines
+            if line.strip().startswith("E ")
+            or "Error" in line
+            or "Exception" in line
+            or "Warning" in line
+        ]
+        if error_lines:
+            clean_query = error_lines[-1]
+        else:
+            for line in reversed(lines):
+                if line.strip() and not line.strip().startswith("="):
+                    clean_query = line.strip()
+                    break
+
+    # 3. Strip local file paths and line number noise
+    clean_query = re.sub(r"\([A-Za-z]:\\[^)]+\)", "", clean_query)
+    clean_query = re.sub(r"\(/[^)]+\)", "", clean_query)
+    clean_query = re.sub(r"[A-Za-z]:\\[^\"'\s]+", "", clean_query)
+    clean_query = re.sub(r"/(?:usr|home|app|tmp|workspace|lib|site-packages)/[^\"'\s]+", "", clean_query)
+    clean_query = re.sub(r",?\s*line\s+\d+.*", "", clean_query)
+    clean_query = re.sub(r"\s+", " ", clean_query).strip()
+
+    # 4. Assemble composite query with library and version context
+    parts = []
+    if clean_lib and clean_lib.lower() not in clean_query.lower():
+        parts.append(clean_lib)
+    if migration_hint and migration_hint.lower() not in clean_query.lower():
+        parts.append(migration_hint)
+    parts.append(clean_query)
+
+    final_search_query = " ".join(p for p in parts if p).strip()
+    return final_search_query, clean_lib
+
+
 @dataclass
 class CorpusChunk:
     doc_ref: str
@@ -433,14 +503,15 @@ def create_docs_server(corpus_dir: str | Path | None = None) -> MCPServer:
 
         max_tokens = min(max_tokens, 1500)
         config = load_config()
-        tavily_key = config.tavily_api_key or os.environ.get("TAVILY_API_KEY")
+        tavily_key = getattr(config, "tavily_api_key", None)
+        if tavily_key is None and not hasattr(config, "tavily_api_key"):
+            tavily_key = os.environ.get("TAVILY_API_KEY")
 
-        search_query = query.strip()
-        if target_library and target_library not in search_query.lower():
-            search_query = f"{target_library} {search_query}"
+        search_query, clean_lib = _normalize_search_query(query, target_library)
 
         raw_chunks: list[dict[str, str]] = []
         source_name = "tavily"
+        tavily_answer: str | None = None
 
         if tavily_key:
             try:
@@ -453,10 +524,12 @@ def create_docs_server(corpus_dir: str | Path | None = None) -> MCPServer:
                             "search_depth": "basic",
                             "max_results": 5,
                             "include_raw_content": False,
+                            "include_answer": True,
                         },
                     )
                     resp.raise_for_status()
                     data = resp.json()
+                    tavily_answer = data.get("answer")
                     for item in data.get("results", []):
                         raw_chunks.append({
                             "title": item.get("title", ""),
@@ -466,6 +539,7 @@ def create_docs_server(corpus_dir: str | Path | None = None) -> MCPServer:
             except (httpx.HTTPError, OSError) as exc:
                 logger.warning("Tavily search failed, falling back to DuckDuckGo", error=str(exc))
                 raw_chunks = []
+                tavily_answer = None
 
         if not raw_chunks:
             source_name = "duckduckgo"
@@ -516,6 +590,20 @@ def create_docs_server(corpus_dir: str | Path | None = None) -> MCPServer:
         final_chunks: list[dict[str, Any]] = []
         accumulated_tokens = 0
 
+        # Prepend synthesized answer from Tavily if available
+        if isinstance(tavily_answer, str) and tavily_answer.strip():
+            clean_ans = _clean_html_artifacts(tavily_answer)
+            ans_tokens = _count_tokens(clean_ans)
+            if ans_tokens <= max_tokens:
+                heading_lib = clean_lib.capitalize() if clean_lib else "Migration"
+                final_chunks.append({
+                    "title": f"Tavily Migration Synthesis: {heading_lib}",
+                    "url": "https://api.tavily.com",
+                    "content": clean_ans,
+                    "tokens": ans_tokens,
+                })
+                accumulated_tokens += ans_tokens
+
         for item in raw_chunks:
             if len(final_chunks) >= 3:
                 break
@@ -549,8 +637,10 @@ def create_docs_server(corpus_dir: str | Path | None = None) -> MCPServer:
 
         return {
             "query": query,
+            "search_query": search_query,
             "target_library": target_library,
             "source": source_name,
+            "answer": tavily_answer,
             "total_tokens": accumulated_tokens,
             "chunks": final_chunks,
         }

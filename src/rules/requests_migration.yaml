@@ -1,0 +1,20 @@
+# Requests Modernization Rule Set
+migration: requests-modernization
+version: "1.0"
+
+rules:
+  - id: requests-default-timeout
+    old_qualified_name: requests.get
+    new_qualified_name: requests.get
+    risk: LOW
+    doc_ref: requests/requests-modernization.md#mandatory-timeouts
+    description: >
+      Ensures requests calls specify an explicit timeout to prevent hanging connections.
+
+  - id: requests-json-data-to-json-kwarg
+    old_qualified_name: requests.post
+    new_qualified_name: requests.post
+    risk: LOW
+    doc_ref: requests/requests-modernization.md#json-parameter
+    description: >
+      Replaces data=json.dumps(...) with native json=... parameter in requests calls.

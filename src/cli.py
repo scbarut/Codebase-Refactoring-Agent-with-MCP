@@ -12,7 +12,7 @@ from typing import Any
 import click
 import httpx
 
-from src.core.config import Settings, load_config
+from src.core.config import Settings, configure_settings, load_config
 from src.core.logging import get_logger, setup_logging
 
 logger = get_logger("cli")
@@ -479,12 +479,22 @@ def run(
 ) -> None:
     """Submit a Migration Job directly via the REST API for scriptable/automated use."""
     settings: Settings = ctx.obj["settings"]
-    if workspace_path:
-        settings.workspace_path = workspace_path
-    if model_lite:
-        settings.model_lite = model_lite
-    if model_default:
-        settings.model_default = model_default
+    # Apply per-invocation overrides and push them into the process-wide singleton
+    # so that any subsequent load_config() call in other modules sees the same values.
+    if workspace_path or model_lite or model_default:
+        updated = settings.model_copy(
+            update={
+                k: v
+                for k, v in {
+                    "workspace_path": workspace_path,
+                    "model_lite": model_lite,
+                    "model_default": model_default,
+                }.items()
+                if v is not None
+            }
+        )
+        configure_settings(updated)
+        settings = updated
 
     api_base = _resolve_api_url(settings, api_url)
     payload: dict[str, Any] = {

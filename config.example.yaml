@@ -18,7 +18,7 @@ workspace_path: "~/.migration-agent/workspaces"
 #   Ollama:    "ollama/qwen2.5-coder:14b", "ollama/llama3.2" (offline/local)
 #
 # model_lite: handles LOW-risk transforms (simple renames, argument reordering)
-model_lite: "gemini/gemini-3.5-flash-lite"
+model_lite: "gemini/gemini-3.5-flash"
 # model_default: handles MEDIUM/HIGH-risk transforms and no-rule LLM fallback
 model_default: "gemini/gemini-3.5-flash"
 

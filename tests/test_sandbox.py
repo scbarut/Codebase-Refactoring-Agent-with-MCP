@@ -289,3 +289,70 @@ def test_docker_sandbox_real_lifecycle(tmp_path):
         manager.destroy_sandbox(container)
         with pytest.raises(docker.errors.NotFound):
             real_client.containers.get(container_id)
+
+
+@pytest.mark.asyncio
+async def test_managed_sandbox_success(mock_docker_client, tmp_path):
+    mock_docker_client.images.get.return_value = MagicMock()
+    mock_container = MagicMock()
+    mock_docker_client.containers.run.return_value = mock_container
+    mock_container.exec_run.return_value = MagicMock(exit_code=0, output=(b"ok", b""))
+
+    manager = SandboxManager(docker_client=mock_docker_client)
+
+    async with manager.managed_sandbox(
+        workspace_path=tmp_path, target_library="pydantic>=2.0"
+    ) as container:
+        assert container == mock_container
+        mock_docker_client.containers.run.assert_called_once()
+
+    # Verify destroyed after context exit
+    mock_container.stop.assert_called_once()
+    mock_container.remove.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_managed_sandbox_cleans_up_on_exception(mock_docker_client, tmp_path):
+    mock_docker_client.images.get.return_value = MagicMock()
+    mock_container = MagicMock()
+    mock_docker_client.containers.run.return_value = mock_container
+
+    manager = SandboxManager(docker_client=mock_docker_client)
+
+    with pytest.raises(RuntimeError, match="something blew up"):
+        async with manager.managed_sandbox(workspace_path=tmp_path) as container:
+            assert container == mock_container
+            raise RuntimeError("something blew up")
+
+    mock_container.stop.assert_called_once()
+    mock_container.remove.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_managed_sandbox_graceful_fallback_when_docker_fails(mock_docker_client, tmp_path):
+    mock_docker_client.images.get.return_value = MagicMock()
+    mock_docker_client.containers.run.side_effect = docker.errors.DockerException("Daemon unreachable")
+
+    manager = SandboxManager(docker_client=mock_docker_client)
+
+    # Should not raise DockerException; yields None
+    async with manager.managed_sandbox(workspace_path=tmp_path) as container:
+        assert container is None
+
+
+def test_install_deps_with_target_library_upgrade(mock_docker_client, tmp_path):
+    mock_container = MagicMock()
+    mock_container.exec_run.return_value = MagicMock(exit_code=0, output=(b"upgraded pydantic", b""))
+
+    manager = SandboxManager(docker_client=mock_docker_client)
+    res = manager.install_deps(
+        mock_container, workspace_path=tmp_path, target_library="pydantic>=2.0"
+    )
+
+    assert res.has_deps is True
+    assert res.exit_code == 0
+    # Container exec_run should be called for pip install --upgrade
+    assert mock_container.exec_run.called
+    calls = [str(call) for call in mock_container.exec_run.call_args_list]
+    assert any("pydantic>=2.0" in c for c in calls)
+

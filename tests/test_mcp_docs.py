@@ -6,8 +6,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from src.mcp_servers.docs_server import (
     _clean_html_artifacts,
+    _normalize_search_query,
     create_docs_server,
 )
+import os
 
 
 @pytest.mark.asyncio
@@ -340,3 +342,105 @@ async def test_web_search_budget_enforcement():
         assert data["total_tokens"] <= 1500
         total_counted = sum(chunk["tokens"] for chunk in data["chunks"])
         assert total_counted <= 1500
+
+
+def test_normalize_search_query_multi_library_and_versions():
+    """Verify dynamic normalization across various libraries, versions, and raw tracebacks."""
+    # 1. Traceback with Python 3.11 paths and version tag celery_v4_to_v5
+    raw_tb = """
+    Traceback (most recent call last):
+      File "/usr/local/lib/python3.11/site-packages/vine/five.py", line 361, in <module>
+        from inspect import formatargspec, getfullargspec
+    ImportError: cannot import name 'formatargspec' from 'inspect' (/usr/local/lib/python3.11/inspect.py)
+    """
+    q, lib = _normalize_search_query(raw_tb, target_library="celery_v4_to_v5")
+    assert lib == "celery"
+    assert "celery" in q.lower()
+    assert "v4 to v5 migration" in q
+    assert "cannot import name 'formatargspec'" in q
+    assert "/usr/local/lib" not in q
+
+    # 2. Pydantic v1 to v2 tag
+    q2, lib2 = _normalize_search_query(
+        "pydantic.errors.PydanticUserError: The 'regex' argument to Field(...) has been removed in Pydantic V2",
+        target_library="pydantic-v1-to-v2",
+    )
+    assert lib2 == "pydantic"
+    assert "v1 to v2 migration" in q2
+    assert "regex" in q2
+
+    # 3. SQLAlchemy version constraint
+    q3, lib3 = _normalize_search_query(
+        "RemovedIn20Warning: Deprecated API features detected!",
+        target_library="sqlalchemy>=2.0,<3.0",
+    )
+    assert lib3 == "sqlalchemy"
+    assert "v2.0 migration" in q3
+
+
+@pytest.mark.asyncio
+async def test_web_search_tavily_with_synthesis_answer():
+    server = create_docs_server()
+
+    mock_tavily_response = {
+        "answer": "In Python 3.11 formatargspec is removed. Celery 5.3+ upgrades vine to 5.0+ which fixes this.",
+        "results": [
+            {
+                "title": "Celery 5.3 Release Notes",
+                "url": "https://docs.celeryq.dev/en/stable/whatsnew-5.3.html",
+                "content": "Python 3.11 compatibility fixes included.",
+            }
+        ],
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = mock_tavily_response
+    mock_resp.raise_for_status = MagicMock()
+
+    with patch("src.mcp_servers.docs_server.load_config") as mock_conf, \
+         patch("httpx.Client.post", return_value=mock_resp):
+        cfg = MagicMock()
+        cfg.tavily_api_key = "fake_key"
+        mock_conf.return_value = cfg
+
+        result = await server.call_tool(
+            "web_search",
+            {
+                "query": "ImportError: cannot import name formatargspec from inspect",
+                "target_library": "celery",
+            },
+        )
+
+        assert not result.is_error
+        data = json.loads(result.content[0].text)
+        assert data["source"] == "tavily"
+        assert data["answer"] == mock_tavily_response["answer"]
+        assert len(data["chunks"]) == 2
+        assert "Tavily Migration Synthesis: Celery" in data["chunks"][0]["title"]
+        assert "Celery 5.3+" in data["chunks"][0]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.environ.get("TAVILY_API_KEY"),
+    reason="TAVILY_API_KEY environment variable not set for live testing",
+)
+async def test_web_search_live_tavily():
+    """Live integration test against the real Tavily search API."""
+    server = create_docs_server()
+    result = await server.call_tool(
+        "web_search",
+        {
+            "query": "celery vine inspect formatargspec python 3.11",
+            "target_library": "celery",
+            "max_tokens": 1200,
+        },
+    )
+    assert not result.is_error
+    data = json.loads(result.content[0].text)
+    assert data["source"] == "tavily"
+    assert len(data["chunks"]) >= 1
+    assert data["total_tokens"] <= 1200
+    assert any("inspect" in c["content"].lower() or "celery" in c["content"].lower() for c in data["chunks"])
+

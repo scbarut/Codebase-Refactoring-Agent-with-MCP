@@ -25,6 +25,7 @@ from langgraph.graph import StateGraph
 from src.core.config import Settings
 from src.core.file_subgraph import (
     FileSubgraphState,
+    _call_llm,
     _clean_code_fence,
     _compute_unified_diff,
     _extract_query_from_traceback,
@@ -132,6 +133,12 @@ def test_find_test_file(tmp_path: Path) -> None:
 
     found = _find_test_file("models.py", str(tmp_path))
     assert found == "tests/test_models.py"
+
+    # When test file imports the module instead of matching name test_{stem}.py
+    schemas_py = tmp_path / "schemas.py"
+    schemas_py.write_text("class ProductModel: pass", encoding="utf-8")
+    test_models.write_text("from schemas import ProductModel\ndef test_prod(): pass", encoding="utf-8")
+    assert _find_test_file("schemas.py", str(tmp_path)) == "tests/test_models.py"
 
     # When no test file exists
     assert _find_test_file("nonexistent.py", str(tmp_path)) is None
@@ -670,3 +677,40 @@ async def test_scenario_episodic_context_isolation(tmp_path: Path) -> None:
     assert res_b.status == FileStatus.SUCCESS
     assert res_b.attempt_count == 0
     assert res_b.traceback == ""
+
+
+@pytest.mark.asyncio
+async def test_call_llm_retries_on_service_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verifies that _call_llm automatically retries with backoff on transient 503 errors."""
+    import asyncio
+
+    import litellm
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    mock_choice = MagicMock()
+    mock_choice.message.content = "fixed code"
+    mock_response = MagicMock(choices=[mock_choice])
+
+    attempts = 0
+
+    async def fake_acompletion(**kwargs: Any) -> Any:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise litellm.ServiceUnavailableError(
+                message="High demand spike",
+                model="gemini/gemini-3.5-flash-lite",
+                llm_provider="gemini",
+            )
+        return mock_response
+
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+
+    result = await _call_llm(
+        model="gemini/gemini-3.5-flash-lite",
+        messages=[{"role": "user", "content": "test"}],
+    )
+    assert result == "fixed code"
+    assert attempts == 2
+

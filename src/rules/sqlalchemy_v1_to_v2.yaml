@@ -1,0 +1,28 @@
+# SQLAlchemy 1.4 → 2.0 Migration Rule Set
+migration: sqlalchemy-v1-to-v2
+version: "1.0"
+
+rules:
+  - id: declarative-base-to-orm-declarative-base
+    old_qualified_name: sqlalchemy.ext.declarative.declarative_base
+    new_qualified_name: sqlalchemy.orm.DeclarativeBase
+    risk: MEDIUM
+    doc_ref: sqlalchemy/sqlalchemy-2.0-migration.md#declarative-base
+    description: >
+      Migrates legacy declarative_base() factory to modern DeclarativeBase subclass or sqlalchemy.orm.declarative_base.
+
+  - id: session-query-to-select
+    old_qualified_name: Session.query
+    new_qualified_name: sqlalchemy.select
+    risk: HIGH
+    doc_ref: sqlalchemy/sqlalchemy-2.0-migration.md#session-execute-select
+    description: >
+      Replaces 1.x style session.query(Model) with 2.0 style select(Model) and session.execute(select(Model)).scalars().
+
+  - id: query-get-to-session-get
+    old_qualified_name: Query.get
+    new_qualified_name: Session.get
+    risk: MEDIUM
+    doc_ref: sqlalchemy/sqlalchemy-2.0-migration.md#session-get
+    description: >
+      Replaces legacy query.get(ident) with session.get(Model, ident).

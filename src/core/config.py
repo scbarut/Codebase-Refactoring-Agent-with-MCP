@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
         description="Path to isolated workspaces directory",
     )
 
-    # Tiered models
+    # Tiered models -- single source of truth, driven by config.yaml (ADR-0001)
     model_lite: str = Field(
         default="gemini/gemini-2.5-flash-lite",
         description="Fast model for low-risk transforms",
@@ -47,7 +47,7 @@ class Settings(BaseSettings):
         description="PostgreSQL connection string for PostgresSaver checkpointer",
     )
 
-    # API Keys & Secrets
+    # API Keys and Secrets
     gemini_api_key: str | None = Field(
         default=None,
         description="Google Gemini API key",
@@ -69,8 +69,8 @@ class Settings(BaseSettings):
         description="Tavily API key for web search fallback",
     )
 
-    # Logging & Server settings
-    log_level: str = Field(default="INFO", description="Log level (DEBUG, INFO, etc.)")
+    # Logging and Server settings
+    log_level: str = Field(default="INFO", description="Log level")
     json_logs: bool = Field(default=True, description="Output structured JSON logs")
     api_host: str = Field(default="0.0.0.0", description="API bind host")
     api_port: int = Field(default=8000, description="API port")
@@ -89,12 +89,46 @@ class Settings(BaseSettings):
         return Path(os.path.expanduser(self.workspace_path)).resolve()
 
 
-def load_config(
+# ---------------------------------------------------------------------------
+# Process-wide singleton
+# ---------------------------------------------------------------------------
+# All modules obtain settings via get_settings() or the zero-arg load_config()
+# shortcut.  This guarantees a single Settings object is shared across the
+# entire process, so changes applied at startup (config.yaml, CLI flags, API
+# env-var overrides) are visible to every module without re-parsing the YAML.
+
+_settings: Settings | None = None
+
+
+def get_settings() -> Settings:
+    """Return the process-wide Settings singleton.
+
+    Builds the singleton lazily from config.yaml on the very first call.
+    Subsequent calls are O(1).
+    """
+    global _settings
+    if _settings is None:
+        _settings = _build_settings()
+    return _settings
+
+
+def configure_settings(settings: Settings) -> None:
+    """Replace the process-wide singleton with a pre-built Settings instance.
+
+    Call this once early in the process lifecycle (CLI entry-point, API startup)
+    after resolving all overrides.  Every subsequent get_settings() or
+    load_config() call in any module will return this instance.
+    """
+    global _settings
+    _settings = settings
+
+
+def _build_settings(
     config_path: Path | str | None = None,
     env_file: Path | str | None = None,
     **overrides: Any,
 ) -> Settings:
-    """Load settings from optional YAML file, optional env file, environment variables, and CLI overrides."""
+    """Parse config sources and return a fresh Settings instance (no caching)."""
     yaml_data: dict[str, Any] = {}
 
     target_path: Path | None = None
@@ -102,6 +136,10 @@ def load_config(
         target_path = Path(config_path)
     elif Path("config.yaml").exists():
         target_path = Path("config.yaml")
+    else:
+        root_config = Path(__file__).resolve().parent.parent.parent / "config.yaml"
+        if root_config.exists():
+            target_path = root_config
 
     if target_path and target_path.exists():
         with open(target_path, "r", encoding="utf-8") as f:
@@ -119,10 +157,10 @@ def load_config(
     else:
         load_dotenv()
 
-    # Allow environment variables prefixed with MIGRATION_AGENT_ to override YAML values
+    # Environment variables prefixed with MIGRATION_AGENT_ override YAML values
     for key, val in os.environ.items():
         if key.startswith("MIGRATION_AGENT_"):
-            clean_key = key[len("MIGRATION_AGENT_") :].lower()
+            clean_key = key[len("MIGRATION_AGENT_"):].lower()
             yaml_data[clean_key] = val
 
     # Direct env overrides for well-known secrets
@@ -135,7 +173,7 @@ def load_config(
     if "TAVILY_API_KEY" in os.environ:
         yaml_data["tavily_api_key"] = os.environ["TAVILY_API_KEY"]
 
-    # Direct CLI flag overrides take highest precedence
+    # CLI flag overrides -- highest precedence
     for key, val in overrides.items():
         if val is not None:
             yaml_data[key] = val
@@ -143,3 +181,32 @@ def load_config(
     if env_file:
         return Settings(_env_file=env_file, **yaml_data)
     return Settings(**yaml_data)
+
+
+def load_config(
+    config_path: Path | str | None = None,
+    env_file: Path | str | None = None,
+    **overrides: Any,
+) -> Settings:
+    """Load settings and return the process-wide singleton.
+
+    Zero-arg call ``load_config()``
+        Returns the already-initialised singleton (builds from config.yaml on
+        the first ever call). This is the hot path used by every internal module.
+
+    Parameterised call ``load_config(config_path=..., model_lite=...)``
+        Builds a fresh Settings from the given sources, REPLACES the singleton,
+        and returns it.  The CLI and API entry-points use this form once at
+        startup so every subsequent zero-arg call across all modules sees the
+        same resolved values (including model_lite and model_default).
+    """
+    global _settings
+    if config_path is None and env_file is None and not overrides:
+        # Fast path -- return or lazily initialise the singleton.
+        return get_settings()
+
+    # Parameterised: rebuild and replace the process-wide singleton.
+    _settings = _build_settings(
+        config_path=config_path, env_file=env_file, **overrides
+    )
+    return _settings

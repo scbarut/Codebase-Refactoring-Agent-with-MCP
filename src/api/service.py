@@ -17,6 +17,10 @@ from src.api.models import (
     JobStatus,
     MigrationResult,
 )
+from src.core.graph import (
+    reset_dispatch_progress_callback,
+    set_dispatch_progress_callback,
+)
 from src.core.logging import get_logger
 
 logger = get_logger("api.service")
@@ -336,84 +340,99 @@ class JobManager:
                 resume_data["branch_name"] = branch_name
             resume_cmd = Command(resume=resume_data)
 
-            async for event in graph.astream(resume_cmd, config):
-                if not isinstance(event, dict):
-                    continue
+            seen_streamed_files: set[str] = set()
 
-                if "resume_from_hitl" in event:
-                    data = event["resume_from_hitl"]
-                    job.branch_name = data.get("branch_name")
-                    self.broadcast(job_id, {
-                        "type": "branch_created",
-                        "branch_name": job.branch_name,
-                        "message": f"Created migration branch '{job.branch_name}'",
-                    })
+            def on_dispatch_progress(event: dict[str, Any]) -> None:
+                if fp := event.get("file_path"):
+                    seen_streamed_files.add(fp)
+                self.broadcast(job_id, event)
 
-                if "dispatch_file_subgraphs" in event:
-                    data = event["dispatch_file_subgraphs"]
-                    file_results = data.get("file_results", [])
-                    for fr in file_results:
-                        f_path = fr.get("file_path", "")
-                        f_status = fr.get("status", "SUCCESS")
-                        attempts = fr.get("attempt_count", 0)
+            token = set_dispatch_progress_callback(on_dispatch_progress)
+            try:
+                async for event in graph.astream(resume_cmd, config):
+                    if not isinstance(event, dict):
+                        continue
 
-                        # Stream individual file progress events
+                    if "resume_from_hitl" in event:
+                        data = event["resume_from_hitl"]
+                        job.branch_name = data.get("branch_name")
                         self.broadcast(job_id, {
-                            "type": "current_file",
-                            "file_path": f_path,
-                            "status": "migrating",
-                            "message": f"Processing file {f_path}",
+                            "type": "branch_created",
+                            "branch_name": job.branch_name,
+                            "message": f"Created migration branch '{job.branch_name}'",
                         })
 
-                        if attempts > 0:
-                            for att in range(1, attempts + 1):
-                                self.broadcast(job_id, {
-                                    "type": "healing_attempt",
-                                    "file_path": f_path,
-                                    "attempt": att,
-                                    "max_attempts": 3,
-                                    "message": f"Self-healing attempt {att}/3 for {f_path}",
-                                })
+                    if "dispatch_file_subgraphs" in event:
+                        data = event["dispatch_file_subgraphs"]
+                        file_results = data.get("file_results", [])
+                        for fr in file_results:
+                            f_path = fr.get("file_path", "")
+                            # Avoid duplicate events if already streamed per-file in real time
+                            if f_path in seen_streamed_files:
+                                continue
 
-                        is_success = (
-                            f_status == FileStatus.SUCCESS
-                            or getattr(f_status, "value", str(f_status)).upper() == "SUCCESS"
-                            or str(f_status).upper().endswith("SUCCESS")
-                        )
-                        status_str = getattr(f_status, "value", str(f_status))
-                        if "." in str(status_str):
-                            status_str = str(status_str).split(".", 1)[1]
+                            f_status = fr.get("status", "SUCCESS")
+                            attempts = fr.get("attempt_count", 0)
 
+                            # Stream individual file progress events (e.g. for stubbed/batch runners)
+                            self.broadcast(job_id, {
+                                "type": "current_file",
+                                "file_path": f_path,
+                                "status": "migrating",
+                                "message": f"Processing file {f_path}",
+                            })
+
+                            if attempts > 0:
+                                for att in range(1, attempts + 1):
+                                    self.broadcast(job_id, {
+                                        "type": "healing_attempt",
+                                        "file_path": f_path,
+                                        "attempt": att,
+                                        "max_attempts": 3,
+                                        "message": f"Self-healing attempt {att}/3 for {f_path}",
+                                    })
+
+                            is_success = (
+                                f_status == FileStatus.SUCCESS
+                                or getattr(f_status, "value", str(f_status)).upper() == "SUCCESS"
+                                or str(f_status).upper().endswith("SUCCESS")
+                            )
+                            status_str = getattr(f_status, "value", str(f_status))
+                            if "." in str(status_str):
+                                status_str = str(status_str).split(".", 1)[1]
+
+                            self.broadcast(job_id, {
+                                "type": "test_result",
+                                "file_path": f_path,
+                                "passed": is_success,
+                                "exit_code": 0 if is_success else 1,
+                                "message": f"Tests {'passed' if is_success else 'failed'} for {f_path}",
+                            })
+
+                            self.broadcast(job_id, {
+                                "type": "file_completed",
+                                "file_path": f_path,
+                                "status": status_str,
+                                "attempt_count": attempts,
+                                "message": f"Finished {f_path} with status {status_str}",
+                            })
+
+                    if "aggregate_results" in event:
                         self.broadcast(job_id, {
-                            "type": "test_result",
-                            "file_path": f_path,
-                            "passed": is_success,
-                            "exit_code": 0 if is_success else 1,
-                            "message": f"Tests {'passed' if is_success else 'failed'} for {f_path}",
+                            "type": "results_aggregated",
+                            "message": "Aggregated migration results",
                         })
 
-                        self.broadcast(job_id, {
-                            "type": "file_completed",
-                            "file_path": f_path,
-                            "status": status_str,
-                            "attempt_count": attempts,
-                            "message": f"Finished {f_path} with status {status_str}",
-                        })
-
-                if "aggregate_results" in event:
-                    self.broadcast(job_id, {
-                        "type": "results_aggregated",
-                        "message": "Aggregated migration results",
-                    })
-
-                if "commit_and_output" in event:
-                    data = event["commit_and_output"]
-                    res_dict = data.get("migration_result", {})
-                    if res_dict:
-                        if isinstance(res_dict, MigrationResult):
-                            job.migration_result = res_dict
-                        else:
-                            job.migration_result = MigrationResult(**res_dict)
+                    if "commit_and_output" in event:
+                        data = event["commit_and_output"]
+                        res_dict = data.get("migration_result", {})
+                        if res_dict:
+                            if isinstance(res_dict, MigrationResult):
+                                job.migration_result = res_dict
+                            else:
+                                job.migration_result = MigrationResult(**res_dict)
+            finally:
+                reset_dispatch_progress_callback(token)
 
             # Fallback if state has migration_result
             if job.migration_result is None and hasattr(graph, "aget_state"):

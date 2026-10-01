@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import { Columns, AlignJustify, Loader2 } from "lucide-react";
 
@@ -35,10 +35,24 @@ export function MonacoDiffViewer({
 }: MonacoDiffViewerProps) {
   const [isSplit, setIsSplit] = useState(true);
   const [isMounted, setIsMounted] = useState(false);
+  const diffEditorRef = useRef<any>(null);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  const handleEditorDidMount = (editor: any) => {
+    diffEditorRef.current = editor;
+  };
+
+  useEffect(() => {
+    if (diffEditorRef.current) {
+      diffEditorRef.current.updateOptions({
+        renderSideBySide: isSplit,
+      });
+      diffEditorRef.current.layout();
+    }
+  }, [isSplit]);
 
   // Detect language from filename if provided
   let detectedLang = language;
@@ -89,6 +103,7 @@ export function MonacoDiffViewer({
             modified={modified}
             language={detectedLang}
             theme="vs-dark"
+            onMount={handleEditorDidMount}
             options={{
               readOnly: true,
               renderSideBySide: isSplit,

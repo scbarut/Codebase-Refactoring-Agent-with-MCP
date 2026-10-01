@@ -76,6 +76,8 @@ class StubbedOrchestrationGraph:
                 raise RuntimeError("Simulated failure during migration phase")
 
             approved = input_data.resume
+            if isinstance(approved, dict) and "approved_files" in approved:
+                approved = approved["approved_files"]
             yield {"resume_from_hitl": {"branch_name": "migrate/pydantic"}}
             yield {
                 "dispatch_file_subgraphs": {

@@ -1148,3 +1148,51 @@ class TestOrchestrationModels:
         assert result.success_count == 1
         assert len(result.successful_files) == 1
         assert result.successful_files[0].file_path == "a.py"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_file_subgraphs_provisions_and_cleans_up_sandbox(tmp_path: Path):
+    """dispatch_file_subgraphs should enter managed_sandbox and pass the container to subgraphs."""
+    from contextlib import asynccontextmanager
+
+    mock_container = MagicMock()
+    passed_containers = []
+    managed_sandbox_called = False
+
+    class MockSandboxManager:
+        @asynccontextmanager
+        async def managed_sandbox(self, workspace_path: str, target_library: str, python_version: str = "3.11"):
+            nonlocal managed_sandbox_called
+            managed_sandbox_called = True
+            yield mock_container
+
+    async def capturing_runner(file_path: str, **kwargs: Any) -> FileResult:
+        passed_containers.append(kwargs.get("sandbox_container"))
+        return FileResult(
+            file_path=file_path,
+            status=FileStatus.SUCCESS,
+            diff="+migrated",
+            traceback="",
+            attempt_count=0,
+        )
+
+    state: dict[str, Any] = {
+        "job_id": "test-job-sandbox-01",
+        "approved_files": ["models.py", "schemas.py"],
+        "workspace_path": str(tmp_path),
+        "target_library": "pydantic",
+        "migration_plan": [
+            {"file_path": "models.py", "matched_rules": [], "risk": RiskLevel.LOW},
+            {"file_path": "schemas.py", "matched_rules": [], "risk": RiskLevel.LOW},
+        ],
+        "sandbox_manager": MockSandboxManager(),
+        "file_subgraph_runner": capturing_runner,
+    }
+
+    res = await dispatch_file_subgraphs(state)
+
+    assert managed_sandbox_called is True
+    assert len(passed_containers) == 2
+    assert passed_containers == [mock_container, mock_container]
+    assert len(res["file_results"]) == 2
+

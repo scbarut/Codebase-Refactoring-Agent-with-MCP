@@ -13,15 +13,25 @@ Maintains episodic context isolation: state is self-contained per file.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import difflib
 import inspect
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
+
+_current_sandbox_container: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "current_sandbox_container", default=None
+)
+_current_sandbox_manager: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "current_sandbox_manager", default=None
+)
 
 from src.core.config import Settings, load_config
 from src.core.logging import get_logger
@@ -180,16 +190,53 @@ def _find_test_file(file_path: str, workspace_path: str) -> str | None:
         return f"tests/{test_name}"
 
     # 2. Check anywhere in workspace (excluding ignored dirs)
-    for found in ws.rglob(test_name):
-        rel_parts = found.relative_to(ws).parts
-        if not any(
-            part in {".venv", "venv", "__pycache__", ".git"} for part in rel_parts
-        ):
-            return str(found.relative_to(ws)).replace("\\", "/")
+    if ws.is_dir():
+        for found in ws.rglob(test_name):
+            rel_parts = found.relative_to(ws).parts
+            if not any(
+                part in {".venv", "venv", "__pycache__", ".git"} for part in rel_parts
+            ):
+                return str(found.relative_to(ws)).replace("\\", "/")
 
     # 3. If file_path itself is a test file
     if "test" in stem.lower() and (ws / file_path).exists():
         return str(file_path).replace("\\", "/")
+
+    # 4. Search test files that import this module
+    if ws.is_dir():
+        ignored = {".venv", "venv", "__pycache__", ".git"}
+        candidate_test_files: list[Path] = []
+        tests_dir = ws / "tests"
+        if tests_dir.is_dir():
+            for candidate in sorted(tests_dir.rglob("*.py")):
+                try:
+                    rel = candidate.relative_to(ws)
+                    if not any(p in ignored for p in rel.parts):
+                        candidate_test_files.append(candidate)
+                except ValueError:
+                    continue
+        for candidate in sorted(ws.rglob("*.py")):
+            if (
+                candidate.name.startswith("test_")
+                or candidate.name.endswith("_test.py")
+            ):
+                try:
+                    rel = candidate.relative_to(ws)
+                    if not any(p in ignored for p in rel.parts) and candidate not in candidate_test_files:
+                        candidate_test_files.append(candidate)
+                except ValueError:
+                    continue
+
+        pattern = re.compile(
+            rf"\b(from\s+[\w.]*{re.escape(stem)}\s+import|import\s+[\w.]*{re.escape(stem)}\b)"
+        )
+        for test_file in candidate_test_files:
+            try:
+                content = test_file.read_text(encoding="utf-8", errors="replace")
+                if pattern.search(content):
+                    return str(test_file.relative_to(ws)).replace("\\", "/")
+            except OSError:
+                continue
 
     return None
 
@@ -258,6 +305,7 @@ async def _call_llm(
     kwargs: dict[str, Any] = {
         "model": model,
         "messages": messages,
+        "num_retries": 3,
     }
 
     # Pass explicit Gemini API key if using Gemini provider; otherwise LiteLLM auto-detects from environment
@@ -266,8 +314,45 @@ async def _call_llm(
     ):
         kwargs["api_key"] = config.gemini_api_key or os.environ.get("GEMINI_API_KEY")
 
-    response = await litellm.acompletion(**kwargs)
-    return response.choices[0].message.content or ""
+    # Configure fallback models solely from config.yaml
+    fallbacks: list[str] = []
+    if config.model_default and model != config.model_default:
+        fallbacks.append(config.model_default)
+    elif config.model_lite and config.model_lite != model:
+        fallbacks.append(config.model_lite)
+
+    if fallbacks:
+        kwargs["fallbacks"] = fallbacks
+
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await litellm.acompletion(**kwargs)
+            return response.choices[0].message.content or ""
+        except (
+            litellm.ServiceUnavailableError,
+            litellm.RateLimitError,
+            litellm.APIConnectionError,
+            litellm.Timeout,
+        ) as err:
+            if attempt == max_attempts:
+                logger.error(
+                    "LLM call failed after retries",
+                    error=str(err),
+                    model=model,
+                )
+                raise
+            backoff = 2 * attempt
+            logger.warning(
+                "Transient LLM error, retrying with backoff",
+                model=model,
+                attempt=attempt,
+                backoff_seconds=backoff,
+                error=str(err),
+            )
+            await asyncio.sleep(backoff)
+
+    return ""
 
 
 # ── Graph Node Functions ───────────────────────────────────────────────
@@ -485,11 +570,13 @@ async def run_tests(state: FileSubgraphState) -> dict[str, Any]:
     """Run scoped pytest targeting the modified module in the Docker Sandbox."""
     file_path = state["file_path"]
     workspace_path = state["workspace_path"]
-    sandbox_manager = state.get("sandbox_manager")
+    sandbox_manager = state.get("sandbox_manager") or _current_sandbox_manager.get()
     if sandbox_manager is None:
         sandbox_manager = SandboxManager()
 
-    sandbox_container = state.get("sandbox_container")
+    sandbox_container = (
+        state.get("sandbox_container") or _current_sandbox_container.get()
+    )
     test_target = _find_test_file(file_path, workspace_path)
 
     if sandbox_container is None:
@@ -614,11 +701,13 @@ async def query_docs(state: FileSubgraphState) -> dict[str, Any]:
                 },
             )
             chunks = web_res.get("chunks", [])
-            if chunks:
-                parts = [
-                    f"### {c.get('title', 'Web Doc')}\n{c.get('content', '')}"
-                    for c in chunks
-                ]
+            answer = web_res.get("answer")
+            parts = []
+            if answer and not any("Tavily Migration Synthesis" in c.get("title", "") for c in chunks):
+                parts.append(f"### Tavily AI Synthesis\n{answer}")
+            for c in chunks:
+                parts.append(f"### {c.get('title', 'Web Doc')}\n{c.get('content', '')}")
+            if parts:
                 doc_context = "\n\n".join(parts)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
@@ -652,6 +741,21 @@ async def patch_code(state: FileSubgraphState) -> dict[str, Any]:
         file=file_path,
         model=model,
     )
+
+    try:
+        from src.core.graph import _dispatch_progress_callback
+
+        cb = _dispatch_progress_callback.get()
+        if cb is not None:
+            cb({
+                "type": "healing_attempt",
+                "file_path": file_path,
+                "attempt": attempts,
+                "max_attempts": state.get("max_healing_attempts", 3),
+                "message": f"Self-healing attempt {attempts}/3 for {file_path}",
+            })
+    except Exception:  # noqa: BLE001, S110
+        pass
 
     prompt = (
         f"You are an expert autonomous software engineer fixing a regression caused by migrating to {target_library}.\n"
@@ -797,6 +901,7 @@ async def run_file_subgraph(
     llm_client: Any = None,
     max_healing_attempts: int = 3,
     checkpointer: Any = None,
+    original_content: str | None = None,
 ) -> FileResult:
     """Execute the File Sub-graph on a single file and return its FileResult.
 
@@ -812,10 +917,8 @@ async def run_file_subgraph(
         "healing_attempts": 0,
         "max_healing_attempts": max_healing_attempts,
     }
-    if sandbox_manager is not None:
-        initial_state["sandbox_manager"] = sandbox_manager
-    if sandbox_container is not None:
-        initial_state["sandbox_container"] = sandbox_container
+    if original_content is not None:
+        initial_state["original_content"] = original_content
     if ast_server is not None:
         initial_state["ast_server"] = ast_server
     if docs_server is not None:
@@ -823,8 +926,14 @@ async def run_file_subgraph(
     if llm_client is not None:
         initial_state["llm_client"] = llm_client
 
-    compiled = compile_file_subgraph(checkpointer=checkpointer)
-    final_state = await compiled.ainvoke(initial_state)
+    token_container = _current_sandbox_container.set(sandbox_container)
+    token_manager = _current_sandbox_manager.set(sandbox_manager)
+    try:
+        compiled = compile_file_subgraph(checkpointer=checkpointer)
+        final_state = await compiled.ainvoke(initial_state)
+    finally:
+        _current_sandbox_container.reset(token_container)
+        _current_sandbox_manager.reset(token_manager)
 
     res_data = final_state.get("file_result")
     if isinstance(res_data, dict):
