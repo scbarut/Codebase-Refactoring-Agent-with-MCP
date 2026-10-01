@@ -46,3 +46,33 @@ def test_load_config_from_env(monkeypatch: pytest.MonkeyPatch):
     assert settings.max_healing_attempts == 7
     assert settings.gemini_api_key == "test-key-123"
     assert settings.database_url == "postgresql://user:pass@db:5432/testdb"
+
+
+def test_load_config_cli_overrides(tmp_path: Path):
+    custom_yaml = tmp_path / "config.yaml"
+    custom_yaml.write_text(
+        yaml.dump({"workspace_path": "/from/yaml", "model_lite": "yaml-lite"}),
+        encoding="utf-8",
+    )
+
+    # Overrides should take precedence over yaml and defaults
+    settings = load_config(
+        config_path=custom_yaml,
+        workspace_path="/from/cli",
+        model_lite="cli-lite",
+        model_default="cli-default",
+    )
+    assert settings.workspace_path == "/from/cli"
+    assert settings.model_lite == "cli-lite"
+    assert settings.model_default == "cli-default"
+
+
+def test_load_config_custom_env_file(tmp_path: Path):
+    custom_env = tmp_path / ".env.custom"
+    custom_env.write_text(
+        "WORKSPACE_PATH=/from/custom/env\nLOG_LEVEL=DEBUG\n", encoding="utf-8"
+    )
+
+    settings = load_config(env_file=custom_env)
+    assert settings.workspace_path == "/from/custom/env"
+    assert settings.log_level == "DEBUG"

@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { Navbar } from "@/components/Navbar";
 
 export const metadata: Metadata = {
-  title: "Migration Agent — Autonomous Code Modernization",
+  title: "Codebase Refactoring Agent",
   description:
     "Autonomous Codebase Refactoring & Migration Agent with Model Context Protocol and Human-in-the-Loop Gateway",
 };

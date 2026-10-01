@@ -5,12 +5,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 load_dotenv()
-
 
 
 class Settings(BaseSettings):
@@ -90,8 +89,12 @@ class Settings(BaseSettings):
         return Path(os.path.expanduser(self.workspace_path)).resolve()
 
 
-def load_config(config_path: Path | str | None = None) -> Settings:
-    """Load settings from optional YAML file and environment variables."""
+def load_config(
+    config_path: Path | str | None = None,
+    env_file: Path | str | None = None,
+    **overrides: Any,
+) -> Settings:
+    """Load settings from optional YAML file, optional env file, environment variables, and CLI overrides."""
     yaml_data: dict[str, Any] = {}
 
     target_path: Path | None = None
@@ -105,6 +108,16 @@ def load_config(config_path: Path | str | None = None) -> Settings:
             content = yaml.safe_load(f)
             if isinstance(content, dict):
                 yaml_data = content
+
+    if env_file and Path(env_file).exists():
+        load_dotenv(dotenv_path=env_file, override=True)
+        env_dict = dotenv_values(env_file)
+        for k, v in env_dict.items():
+            if v is not None:
+                clean_k = k.lower().removeprefix("migration_agent_")
+                yaml_data[clean_k] = v
+    else:
+        load_dotenv()
 
     # Allow environment variables prefixed with MIGRATION_AGENT_ to override YAML values
     for key, val in os.environ.items():
@@ -122,4 +135,11 @@ def load_config(config_path: Path | str | None = None) -> Settings:
     if "TAVILY_API_KEY" in os.environ:
         yaml_data["tavily_api_key"] = os.environ["TAVILY_API_KEY"]
 
+    # Direct CLI flag overrides take highest precedence
+    for key, val in overrides.items():
+        if val is not None:
+            yaml_data[key] = val
+
+    if env_file:
+        return Settings(_env_file=env_file, **yaml_data)
     return Settings(**yaml_data)
