@@ -12,6 +12,7 @@ from langgraph.types import Command
 
 from src.api.models import (
     FilePlanEntry,
+    FileStatus,
     JobResponse,
     JobStatus,
     MigrationResult,
@@ -355,7 +356,15 @@ class JobManager:
                                     "message": f"Self-healing attempt {att}/3 for {f_path}",
                                 })
 
-                        is_success = str(f_status).upper() == "SUCCESS"
+                        is_success = (
+                            f_status == FileStatus.SUCCESS
+                            or getattr(f_status, "value", str(f_status)).upper() == "SUCCESS"
+                            or str(f_status).upper().endswith("SUCCESS")
+                        )
+                        status_str = getattr(f_status, "value", str(f_status))
+                        if "." in str(status_str):
+                            status_str = str(status_str).split(".", 1)[1]
+
                         self.broadcast(job_id, {
                             "type": "test_result",
                             "file_path": f_path,
@@ -367,9 +376,9 @@ class JobManager:
                         self.broadcast(job_id, {
                             "type": "file_completed",
                             "file_path": f_path,
-                            "status": str(f_status),
+                            "status": status_str,
                             "attempt_count": attempts,
-                            "message": f"Finished {f_path} with status {f_status}",
+                            "message": f"Finished {f_path} with status {status_str}",
                         })
 
                 if "aggregate_results" in event:

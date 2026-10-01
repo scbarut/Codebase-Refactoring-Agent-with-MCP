@@ -49,7 +49,37 @@ def _extract_repo_name(source: str) -> str:
         name = os.path.basename(path)
         name = name.removesuffix(".git")
         return name or "repository"
-    return Path(source).resolve().name or "repository"
+    norm = source.strip().strip("'\"").replace("\\", "/").rstrip("/")
+    name = os.path.basename(norm)
+    return name or "repository"
+
+
+def _resolve_local_source_path(source: str) -> Path:
+    """Resolve a local source path, gracefully handling Windows paths inside Docker containers."""
+    norm = source.strip().strip("'\"").replace("\\", "/").rstrip("/")
+
+    # 1. Direct path check (works on host or native Linux paths)
+    direct = Path(norm).resolve()
+    if direct.exists():
+        return direct
+
+    # 2. Relative from current working directory
+    rel = (Path.cwd() / norm.lstrip("/")).resolve()
+    if rel.exists():
+        return rel
+
+    # 3. Handle host Windows absolute path inside a Linux Docker container:
+    # E.g. source is 'C:/Users/.../temprepo', but inside container cwd is '/app' and temprepo is at '/app/temprepo'
+    parts = [p for p in norm.split("/") if p and not p.endswith(":")]
+    for i in range(len(parts)):
+        sub_rel = "/".join(parts[i:])
+        candidate = (Path.cwd() / sub_rel).resolve()
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+
+    raise FileNotFoundError(
+        f"Source directory does not exist: {source} (resolved as {direct})"
+    )
 
 
 def create_git_server() -> MCPServer:
@@ -87,9 +117,7 @@ def create_git_server() -> MCPServer:
             _run_git(["clone", source, str(workspace_path)])
             base_branch = _get_current_branch(workspace_path)
         else:
-            source_path = Path(source).resolve()
-            if not source_path.exists():
-                raise FileNotFoundError(f"Source directory does not exist: {source_path}")
+            source_path = _resolve_local_source_path(source)
 
             shutil.copytree(
                 source_path,

@@ -54,3 +54,6 @@ autonomous_codebase_refactoring_migration_agent.md
 
 # Local Agent Customizations
 .agents/
+
+# Local test repo
+temprepo/

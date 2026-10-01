@@ -313,3 +313,32 @@ async def test_commit_file_outside_workspace_rejected(tmp_path: Path):
                 "message": "Escape attempt",
             },
         )
+
+
+def test_resolve_local_source_path_windows_style(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    from src.mcp_servers.git_server import _resolve_local_source_path
+
+    monkeypatch.chdir(tmp_path)
+    sample_repo = tmp_path / "temprepo"
+    sample_repo.mkdir()
+
+    # 1. Host Windows absolute path
+    resolved = _resolve_local_source_path(r"C:\Users\Sadık\Desktop\Work\temprepo")
+    assert resolved == sample_repo
+
+    # 2. Relative path
+    resolved_rel = _resolve_local_source_path("./temprepo")
+    assert resolved_rel == sample_repo
+
+    # 3. Direct folder name
+    resolved_name = _resolve_local_source_path("temprepo")
+    assert resolved_name == sample_repo
+
+    # 4. Host Windows path with trailing backslash
+    resolved_slash = _resolve_local_source_path("C:\\Users\\Sadık\\Desktop\\Work\\temprepo\\")
+    assert resolved_slash == sample_repo
+
+    # 5. Non-existent path raises FileNotFoundError
+    with pytest.raises(FileNotFoundError):
+        _resolve_local_source_path(r"C:\NonExistent\Path\missing_repo")
+

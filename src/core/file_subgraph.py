@@ -28,10 +28,20 @@ from src.core.logging import get_logger
 from src.core.mcp_client import call_mcp_tool
 from src.core.models import FileResult, FileStatus, MatchedRule, RiskLevel
 from src.core.sandbox import SandboxManager
-from src.mcp_servers.ast_server import create_ast_server
-from src.mcp_servers.docs_server import create_docs_server
 
 logger = get_logger(__name__)
+
+
+def _get_ast_server():
+    from src.mcp_servers.ast_server import create_ast_server
+
+    return create_ast_server()
+
+
+def _get_docs_server():
+    from src.mcp_servers.docs_server import create_docs_server
+
+    return create_docs_server()
 
 
 # ── State Schema ───────────────────────────────────────────────────────
@@ -292,7 +302,7 @@ async def apply_rules(state: FileSubgraphState) -> dict[str, Any]:
 
     ast_server = state.get("ast_server")
     if ast_server is None:
-        ast_server = create_ast_server()
+        ast_server = _get_ast_server()
 
     unmatched_rules: list[dict[str, Any]] = []
 
@@ -375,7 +385,7 @@ async def llm_fallback(state: FileSubgraphState) -> dict[str, Any]:
 
     docs_server = state.get("docs_server")
     if docs_server is None:
-        docs_server = create_docs_server()
+        docs_server = _get_docs_server()
 
     # Determine highest risk among unmatched rules
     rule_risks = [
@@ -566,7 +576,7 @@ async def query_docs(state: FileSubgraphState) -> dict[str, Any]:
     target_library = state.get("target_library", "pydantic")
     docs_server = state.get("docs_server")
     if docs_server is None:
-        docs_server = create_docs_server()
+        docs_server = _get_docs_server()
 
     search_query = _extract_query_from_traceback(tb)
     logger.info(

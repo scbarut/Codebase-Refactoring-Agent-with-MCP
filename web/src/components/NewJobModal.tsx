@@ -84,7 +84,7 @@ export function NewJobModal({ isOpen, onClose, onJobCreated }: NewJobModalProps)
             <label htmlFor="source-input">
               <span>Codebase Source</span>
               <span className="label-hint">
-                Local directory path or Git clone URL
+                Windows path, relative path, or Git URL
               </span>
             </label>
             <div className="input-with-icon">
@@ -96,7 +96,7 @@ export function NewJobModal({ isOpen, onClose, onJobCreated }: NewJobModalProps)
               <input
                 id="source-input"
                 type="text"
-                placeholder="e.g. /home/user/my-repo or https://github.com/org/repo.git"
+                placeholder="e.g. ./temprepo, C:\...\temprepo, or https://github.com/..."
                 value={source}
                 onChange={(e) => setSource(e.target.value)}
                 required
@@ -108,9 +108,16 @@ export function NewJobModal({ isOpen, onClose, onJobCreated }: NewJobModalProps)
               <button
                 type="button"
                 className="preset-chip"
-                onClick={() => setSource("./test-repo")}
+                onClick={() => setSource("./temprepo")}
               >
-                ./test-repo
+                ./temprepo
+              </button>
+              <button
+                type="button"
+                className="preset-chip"
+                onClick={() => setSource("C:\\projects\\sample-repo")}
+              >
+                C:\projects\sample-repo
               </button>
               <button
                 type="button"
@@ -122,6 +129,9 @@ export function NewJobModal({ isOpen, onClose, onJobCreated }: NewJobModalProps)
                 fastapi.git
               </button>
             </div>
+            <p className="label-hint">
+              💡 Windows paths (<code>C:\...</code>), relative paths (<code>./temprepo</code>), and Git URLs are dynamically resolved &amp; mounted.
+            </p>
           </div>
 
           <div className="form-group">

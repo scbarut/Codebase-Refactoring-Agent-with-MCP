@@ -44,11 +44,21 @@ from src.core.models import (
     MigrationResult,
     RiskLevel,
 )
-from src.mcp_servers.ast_server import create_ast_server
-from src.mcp_servers.git_server import create_git_server
 from src.rules.loader import load_rules
 
 logger = get_logger(__name__)
+
+
+def _get_git_server():
+    from src.mcp_servers.git_server import create_git_server
+
+    return create_git_server()
+
+
+def _get_ast_server():
+    from src.mcp_servers.ast_server import create_ast_server
+
+    return create_ast_server()
 
 # ── Rule set resolution ────────────────────────────────────────────────
 
@@ -148,7 +158,7 @@ async def ingest(state: MigrationGraphState) -> dict[str, Any]:
     """
     git_server = state.get("git_server")
     if git_server is None:
-        git_server = create_git_server()
+        git_server = _get_git_server()
 
     call_args: dict[str, Any] = {"source": state["source"]}
     # Prefer workspace_base_dir from state (useful for tests), then config
@@ -191,7 +201,7 @@ async def scan(state: MigrationGraphState) -> dict[str, Any]:
     """
     ast_server = state.get("ast_server")
     if ast_server is None:
-        ast_server = create_ast_server()
+        ast_server = _get_ast_server()
 
     data = await call_mcp_tool(
         ast_server,
@@ -425,7 +435,7 @@ async def build_plan(state: MigrationGraphState) -> dict[str, Any]:
     """
     ast_server = state.get("ast_server")
     if ast_server is None:
-        ast_server = create_ast_server()
+        ast_server = _get_ast_server()
     rules = load_rules(state["rule_set_path"])
     workspace_path = state["workspace_path"]
     scanned_files = state["scanned_files"]
@@ -515,7 +525,7 @@ async def resume_from_hitl(state: MigrationGraphState) -> dict[str, Any]:
     target_library = state.get("target_library", "migration")
     git_server = state.get("git_server")
     if git_server is None:
-        git_server = create_git_server()
+        git_server = _get_git_server()
 
     branch_name = state.get("branch_name")
     if not branch_name and workspace_path:
@@ -711,7 +721,7 @@ async def commit_and_output(state: MigrationGraphState) -> dict[str, Any]:
 
     git_server = state.get("git_server")
     if git_server is None:
-        git_server = create_git_server()
+        git_server = _get_git_server()
 
     # 1. Commit each successful file
     successful_files = [
