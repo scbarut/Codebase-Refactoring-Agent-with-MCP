@@ -8,19 +8,26 @@ import {
   ArrowRight,
   Check,
   CheckCircle2,
+  CheckCheck,
   ChevronDown,
   ChevronRight,
+  Code2,
+  Copy,
   FileCode2,
   Filter,
+  Folder,
+  GitBranch,
   Loader2,
   Play,
   Radar,
   RefreshCw,
   ShieldAlert,
+  X,
 } from "lucide-react";
 import { approveJob, fetchJob, fetchJobPlan } from "@/lib/api";
 import { FilePlanEntry, JobResponse, RiskLevel } from "@/lib/types";
 import { RiskBadge } from "@/components/RiskBadge";
+import { CopyButton } from "@/components/CopyButton";
 
 export default function PlanReviewPage() {
   const params = useParams();
@@ -36,12 +43,25 @@ export default function PlanReviewPage() {
   const [error, setError] = useState<string | null>(null);
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const [riskFilter, setRiskFilter] = useState<string>("ALL");
+  const [customBranch, setCustomBranch] = useState<string>("");
+  const [selectedTransformer, setSelectedTransformer] = useState<{
+    ruleId: string;
+    className: string;
+    description?: string;
+  } | null>(null);
 
   const loadData = useCallback(async () => {
     if (!id) return;
     try {
       const jobData = await fetchJob(id);
       setJob(jobData);
+      setCustomBranch((prev) => {
+        if (prev) return prev;
+        return (
+          jobData.branch_name ||
+          `migrate/${jobData.target_library ? jobData.target_library.toLowerCase().replace(/[^a-z0-9_\-\.]/g, "-") : "v2"}-v2`
+        );
+      });
 
       if (jobData.status === "scanning") {
         setIsScanning(true);
@@ -124,7 +144,7 @@ export default function PlanReviewPage() {
       setApproving(true);
       setError(null);
       const filesToApprove = Array.from(selectedFiles);
-      await approveJob(id, filesToApprove);
+      await approveJob(id, filesToApprove, customBranch || undefined);
       // Immediately navigate to live progress page to observe execution
       router.push(`/jobs/${id}/progress`);
     } catch (err: any) {
@@ -245,6 +265,77 @@ export default function PlanReviewPage() {
               </div>
             </div>
           )}
+
+          {/* Workspace & Branch Configuration Card */}
+          <div className="workspace-meta-card">
+            <div className="workspace-meta-grid">
+              <div className="workspace-meta-col">
+                <div className="workspace-meta-header">
+                  <Folder size={16} className="text-indigo-400" />
+                  <span className="workspace-meta-title">
+                    Isolated Workspace Directory
+                  </span>
+                </div>
+                <div className="workspace-meta-content">
+                  <div className="path-code-box">
+                    <span
+                      className="path-text"
+                      title={job?.workspace_path || ""}
+                    >
+                      {job?.workspace_path || "Preparing workspace..."}
+                    </span>
+                    {job?.workspace_path && (
+                      <CopyButton
+                        text={job.workspace_path}
+                        label="Copy"
+                        className="btn-copy-mini"
+                      />
+                    )}
+                  </div>
+                  <span className="workspace-hint">
+                    Refactored code is generated in this isolated directory. Your
+                    original repository is untouched until you apply/merge.
+                  </span>
+                </div>
+              </div>
+
+              <div className="workspace-meta-col">
+                <div className="workspace-meta-header">
+                  <GitBranch size={16} className="text-cyan-400" />
+                  <span className="workspace-meta-title">
+                    Target Git Branch
+                  </span>
+                </div>
+                <div className="workspace-meta-content">
+                  {isAwaitingApproval ? (
+                    <div className="branch-input-wrapper">
+                      <input
+                        type="text"
+                        className="branch-input"
+                        value={customBranch}
+                        onChange={(e) => setCustomBranch(e.target.value)}
+                        placeholder="e.g. migrate/pydantic-v2"
+                        spellCheck={false}
+                      />
+                      <span className="workspace-hint">
+                        Target branch for migration commits (editable before
+                        approval).
+                      </span>
+                    </div>
+                  ) : (
+                    <div className="branch-display-wrapper">
+                      <code className="branch-badge">
+                        {job?.branch_name || customBranch || "migrate/v2"}
+                      </code>
+                      <span className="workspace-hint">
+                        Migration branch created and checked out in workspace.
+                      </span>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* Plan Summary Row */}
           <div className="plan-summary-row">
@@ -474,9 +565,26 @@ export default function PlanReviewPage() {
                                           </span>
                                         </div>
                                         {rule.transformer_class && (
-                                          <span className="transformer-info">
-                                            Transformer: {rule.transformer_class}
-                                          </span>
+                                          <div className="transformer-trigger-wrap">
+                                            <button
+                                              type="button"
+                                              className="transformer-chip-btn"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setSelectedTransformer({
+                                                  ruleId: rule.rule_id,
+                                                  className: rule.transformer_class!,
+                                                  description: rule.description ?? undefined,
+                                                });
+                                              }}
+                                              title="Click to view full transformer class details"
+                                            >
+                                              <Code2 size={13} />
+                                              <span>
+                                                Transformer: {rule.transformer_class.split(".").pop()}
+                                              </span>
+                                            </button>
+                                          </div>
                                         )}
                                       </div>
                                     ))}
@@ -523,41 +631,85 @@ export default function PlanReviewPage() {
                 </tbody>
               </table>
             </div>
-
-            {/* Bottom Approval Sticky Bar if awaiting approval */}
-            {isAwaitingApproval && (
-              <div className="plan-footer-sticky">
-                <div className="footer-left">
-                  <span>
-                    Selected <strong>{selectedFiles.size}</strong> of{" "}
-                    <strong>{plan.length}</strong> files for automated
-                    migration.
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className="btn-approve-primary"
-                  onClick={handleApprove}
-                  disabled={approving || selectedFiles.size === 0}
-                >
-                  {approving ? (
-                    <>
-                      <Loader2 className="animate-spin" size={16} />
-                      <span>Approving...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Check size={16} />
-                      <span>
-                        Approve Selected Files ({selectedFiles.size})
-                      </span>
-                    </>
-                  )}
-                </button>
-              </div>
-            )}
           </div>
         </>
+      )}
+
+      {/* Transformer Details Modal Dialog */}
+      {selectedTransformer && (
+        <div
+          className="transformer-modal-overlay"
+          onClick={() => setSelectedTransformer(null)}
+        >
+          <div
+            className="transformer-modal-card"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+          >
+            <div className="transformer-modal-header">
+              <h3>
+                <Code2 className="text-indigo-400" size={18} />
+                <span>CST Transformer Details</span>
+              </h3>
+              <button
+                type="button"
+                className="modal-close-btn"
+                onClick={() => setSelectedTransformer(null)}
+                aria-label="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="transformer-modal-body">
+              <div className="transformer-meta-item">
+                <span className="transformer-meta-label">Associated Rule</span>
+                <span className="transformer-meta-val">
+                  {selectedTransformer.ruleId}
+                </span>
+              </div>
+
+              <div className="transformer-meta-item">
+                <span className="transformer-meta-label">Qualified Class Path</span>
+                <div className="transformer-class-box">
+                  <code className="transformer-class-code">
+                    {selectedTransformer.className}
+                  </code>
+                  <CopyButton
+                    text={selectedTransformer.className}
+                    label="Copy"
+                    className="transformer-copy-btn"
+                  />
+                </div>
+              </div>
+
+              {selectedTransformer.description && (
+                <div className="transformer-meta-item">
+                  <span className="transformer-meta-label">
+                    Transformation Behavior
+                  </span>
+                  <p className="transformer-desc-text">
+                    {selectedTransformer.description}
+                  </p>
+                </div>
+              )}
+
+              <div className="transformer-note-box">
+                💡 <strong>LibCST Transformer:</strong> Mechanically transforms the
+                Python AST node deterministically without requiring an LLM call.
+              </div>
+            </div>
+            <div className="transformer-modal-footer">
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setSelectedTransformer(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -83,9 +83,13 @@ export async function fetchJobPlan(id: string): Promise<FilePlanEntry[]> {
 
 export async function approveJob(
   id: string,
-  approvedFiles: string[]
+  approvedFiles: string[],
+  branchName?: string | null
 ): Promise<JobApproveResponse> {
-  const payload: JobApproveRequest = { approved_files: approvedFiles };
+  const payload: JobApproveRequest = {
+    approved_files: approvedFiles,
+    branch_name: branchName?.trim() || undefined,
+  };
   const res = await fetch(`${API_BASE}/api/jobs/${id}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

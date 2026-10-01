@@ -125,9 +125,15 @@ async def approve_job(
     graph: Annotated[Any, Depends(get_orchestration_graph)],
 ) -> JobApproveResponse:
     """Approve a subset or full list of files to proceed with migration rewrite."""
-    job = manager.approve_job(id, request.approved_files)
+    job = manager.approve_job(id, request.approved_files, request.branch_name)
     # Launch migration phase in background task
-    background_tasks.add_task(manager.run_migrate_phase, id, request.approved_files, graph)
+    background_tasks.add_task(
+        manager.run_migrate_phase,
+        id,
+        request.approved_files,
+        graph,
+        request.branch_name,
+    )
 
     return JobApproveResponse(
         job_id=job.job_id,

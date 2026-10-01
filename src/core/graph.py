@@ -386,6 +386,7 @@ async def _build_file_plan_entry(
                     new_qualified_name=rule["new_qualified_name"],
                     risk=RiskLevel(rule["risk"]),
                     transformer_class=rule.get("transformer_class"),
+                    description=rule.get("description"),
                 )
             )
 
@@ -494,7 +495,10 @@ def hitl_gateway(state: MigrationGraphState) -> dict[str, Any]:
 
     # If the human sent back a dict with an ``approved_files`` key
     if isinstance(approved, dict) and "approved_files" in approved:
-        return {"approved_files": approved["approved_files"]}
+        result: dict[str, Any] = {"approved_files": approved["approved_files"]}
+        if "branch_name" in approved and approved["branch_name"]:
+            result["branch_name"] = approved["branch_name"]
+        return result
 
     # Default: approve everything in the plan
     return {"approved_files": [e["file_path"] for e in plan]}
@@ -528,20 +532,19 @@ async def resume_from_hitl(state: MigrationGraphState) -> dict[str, Any]:
         git_server = _get_git_server()
 
     branch_name = state.get("branch_name")
-    if not branch_name and workspace_path:
+    if workspace_path:
         try:
-            res = await _call_git_tool(
-                git_server,
-                "create_branch",
-                {
-                    "workspace_path": workspace_path,
-                    "target_library": target_library,
-                },
-            )
-            branch_name = res.get("branch_name")
+            call_args: dict[str, Any] = {
+                "workspace_path": workspace_path,
+                "target_library": target_library,
+            }
+            if branch_name:
+                call_args["branch_name"] = branch_name
+            res = await _call_git_tool(git_server, "create_branch", call_args)
+            branch_name = res.get("branch_name") or branch_name
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not create git branch", error=str(exc))
-            branch_name = f"migrate/{target_library}"
+            branch_name = branch_name or f"migrate/{target_library}"
 
     logger.info(
         "Resumed from HITL Gateway",

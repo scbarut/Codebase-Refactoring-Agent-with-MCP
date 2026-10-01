@@ -123,7 +123,12 @@ class JobManager:
             )
         return job.migration_plan
 
-    def approve_job(self, job_id: str, approved_files: list[str]) -> JobInfo:
+    def approve_job(
+        self,
+        job_id: str,
+        approved_files: list[str],
+        branch_name: str | None = None,
+    ) -> JobInfo:
         job = self.get_job(job_id)
         if job is None:
             raise HTTPException(
@@ -137,6 +142,8 @@ class JobManager:
                 detail=f"Job '{job_id}' is not awaiting approval (current status: {job.status.value})",
             )
         job.approved_files = approved_files
+        if branch_name:
+            job.branch_name = branch_name
         job.update_status(JobStatus.MIGRATING)
         return job
 
@@ -298,7 +305,13 @@ class JobManager:
                 "is_final": True,
             })
 
-    async def run_migrate_phase(self, job_id: str, approved_files: list[str], graph: Any) -> None:
+    async def run_migrate_phase(
+        self,
+        job_id: str,
+        approved_files: list[str],
+        graph: Any,
+        branch_name: str | None = None,
+    ) -> None:
         """Resume graph execution from HITL Gateway with the approved file list."""
         job = self.get_job(job_id)
         if not job:
@@ -307,15 +320,21 @@ class JobManager:
         try:
             job.update_status(JobStatus.MIGRATING)
             job.approved_files = approved_files
+            if branch_name:
+                job.branch_name = branch_name
             self.broadcast(job_id, {
                 "type": "job_resumed",
                 "status": "migrating",
                 "approved_files": approved_files,
+                "branch_name": job.branch_name,
                 "message": f"Migration resumed with {len(approved_files)} approved files",
             })
 
             config = {"configurable": {"thread_id": job_id}}
-            resume_cmd = Command(resume=approved_files)
+            resume_data: dict[str, Any] = {"approved_files": approved_files}
+            if branch_name:
+                resume_data["branch_name"] = branch_name
+            resume_cmd = Command(resume=resume_data)
 
             async for event in graph.astream(resume_cmd, config):
                 if not isinstance(event, dict):

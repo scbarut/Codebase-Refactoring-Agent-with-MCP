@@ -174,10 +174,9 @@ def create_git_server() -> MCPServer:
         base_branch = _get_current_branch(workspace)
         if not branch_name:
             sanitized_lib = re.sub(r"[^a-zA-Z0-9_\-\.]", "-", target_library).strip("-")
-            timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-            branch_name = f"migrate/{sanitized_lib}-{timestamp}"
+            branch_name = f"migrate/{sanitized_lib}-v2"
 
-        _run_git(["checkout", "-b", branch_name], cwd=workspace)
+        _run_git(["checkout", "-B", branch_name], cwd=workspace)
 
         return {
             "branch_name": branch_name,

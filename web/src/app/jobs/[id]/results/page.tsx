@@ -13,6 +13,7 @@ import {
   ExternalLink,
   FileCode,
   Flame,
+  Folder,
   GitBranch,
   GitPullRequest,
   Loader2,
@@ -384,8 +385,23 @@ export default function ResultsPage() {
                   <h3>Apply Changes Locally</h3>
                   <p>
                     Execute these git commands in your repository root to check
-                    out the migration branch and apply changes.
+                    out and merge the migration branch{" "}
+                    <strong>
+                      {gitCommands?.branch_name || job?.branch_name || "migrate"}
+                    </strong>
+                    .
                   </p>
+                  {(job?.workspace_path || gitCommands?.workspace_path) && (
+                    <div className="results-workspace-info">
+                      <span className="workspace-info-label">
+                        <Folder size={13} className="text-indigo-400" />
+                        Workspace:
+                      </span>
+                      <code className="workspace-info-path">
+                        {gitCommands?.workspace_path || job?.workspace_path}
+                      </code>
+                    </div>
+                  )}
                 </div>
               </div>
 

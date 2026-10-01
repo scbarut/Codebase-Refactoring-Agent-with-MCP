@@ -37,6 +37,7 @@ export interface JobCreateResponse {
 
 export interface JobApproveRequest {
   approved_files: string[];
+  branch_name?: string | null;
 }
 
 export interface JobApproveResponse {
@@ -51,6 +52,7 @@ export interface MatchedRule {
   new_qualified_name: string;
   risk: RiskLevel;
   transformer_class?: string | null;
+  description?: string | null;
 }
 
 export interface AffectedNode {

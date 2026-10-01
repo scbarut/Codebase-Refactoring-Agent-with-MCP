@@ -39,6 +39,7 @@ class MatchedRule(BaseModel):
         new_qualified_name: The new replacement API surface.
         risk: Base risk category from the rule definition.
         transformer_class: Dotted path to the libcst transformer, if any.
+        description: Human-readable explanation of what this rule transforms.
     """
 
     rule_id: str
@@ -46,6 +47,7 @@ class MatchedRule(BaseModel):
     new_qualified_name: str
     risk: RiskLevel
     transformer_class: str | None = None
+    description: str | None = None
 
 
 class AffectedNode(BaseModel):

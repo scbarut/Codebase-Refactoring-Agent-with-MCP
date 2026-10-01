@@ -71,6 +71,11 @@ class JobApproveRequest(BaseModel):
         description="List of relative file paths approved for automated migration.",
         examples=[["models.py", "schemas.py"]],
     )
+    branch_name: str | None = Field(
+        default=None,
+        description="Optional custom git branch name for the migration.",
+        examples=["migrate/pydantic-v2"],
+    )
 
 
 class JobApproveResponse(BaseModel):
