@@ -268,6 +268,26 @@ class Item(BaseModel):
     )
 
 
+@pytest.mark.asyncio
+async def test_config_class_without_inner_config_does_not_add_configdict(tmp_path: Path):
+    """File without inner class Config must NOT have ConfigDict added to imports."""
+    server = create_ast_server()
+    code = '''\
+from pydantic import BaseModel, Field
+
+class Answer(BaseModel):
+    text: str = Field(...)
+'''
+    transformer = "src.rules.pydantic_transformers.ConfigClassToModelConfigTransformer"
+    file = tmp_path / "answer.py"
+    file.write_text(code, encoding="utf-8")
+    data = await _apply(server, str(file), transformer)
+
+    assert data["modified"] is False
+    assert "ConfigDict" not in data["transformed_code"]
+    assert data["transformed_code"] == code
+
+
 # ── BaseSettings import ───────────────────────────────────────────────
 
 

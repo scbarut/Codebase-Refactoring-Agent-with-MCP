@@ -347,8 +347,15 @@ def _index_all_corpus(corpus_dir: Path, target_library: str | None = None) -> li
         return []
 
     search_dir = corpus_dir
+    clean_target = (
+        re.sub(r"[_\-]?v?\d+.*$", "", target_library).strip()
+        if target_library
+        else ""
+    )
     if target_library:
         lib_dir = corpus_dir / target_library
+        if not (lib_dir.exists() and lib_dir.is_dir()) and clean_target:
+            lib_dir = corpus_dir / clean_target
         if lib_dir.exists() and lib_dir.is_dir():
             search_dir = lib_dir
 
@@ -359,7 +366,8 @@ def _index_all_corpus(corpus_dir: Path, target_library: str | None = None) -> li
             rel_path = md_path.relative_to(corpus_dir).as_posix()
             lib_name = rel_path.split("/")[0] if "/" in rel_path else "general"
             if target_library and lib_name != target_library:
-                continue
+                if not (clean_target and (lib_name == clean_target or clean_target in lib_name or lib_name in target_library)):
+                    continue
             chunks = _parse_markdown_sections(content, rel_path, lib_name)
             all_chunks.extend(chunks)
         except (OSError, UnicodeDecodeError) as exc:
@@ -556,19 +564,35 @@ def create_docs_server(corpus_dir: str | Path | None = None) -> MCPServer:
                     resp.raise_for_status()
                     html_content = resp.text
 
-                    # Parse results from HTML using regex
+                    # Parse results from HTML using regex (matching DuckDuckGo's result__a links and snippets)
                     result_blocks = re.findall(
-                        r'<div class="result__body">.*?<h2 class="result__title">.*?<a class="result__url" href="([^"]+)".*?>(.*?)</a>.*?<a class="result__snippet[^"]*">(.*?)</a>',
+                        r'<div[^>]*class="[^"]*result__body[^"]*"[^>]*>.*?<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
                         html_content,
                         re.DOTALL,
                     )
                     if not result_blocks:
-                        # Alternative result block pattern
+                        # Alternative result block pattern (e.g. h2 wrapping result__a or result__url)
                         result_blocks = re.findall(
-                            r'<a class="result__url"[^>]*href="([^"]+)".*?<h2[^>]*>(.*?)</h2>.*?class="result__snippet[^"]*">(.*?)</a>',
+                            r'<h2[^>]*>.*?<a[^>]*class="[^"]*result__[a-z]+"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?</h2>.*?<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
                             html_content,
                             re.DOTALL,
                         )
+                    if not result_blocks:
+                        # Fallback: extract result__a links and result__snippet tags directly
+                        urls_titles = re.findall(
+                            r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                            html_content,
+                            re.DOTALL,
+                        )
+                        snippets = re.findall(
+                            r'<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>(.*?)</a>',
+                            html_content,
+                            re.DOTALL,
+                        )
+                        result_blocks = [
+                            (u, t, s)
+                            for (u, t), s in zip(urls_titles, snippets)
+                        ]
 
                     for raw_url, raw_title, raw_snippet in result_blocks[:5]:
                         clean_url = raw_url

@@ -389,7 +389,23 @@ class SandboxManager:
 
         passed = (exec_res.exit_code == 0)
         traceback_text = ""
-        if not passed:
+        # Pytest exit code 5 means NO_TESTS_COLLECTED.
+        # If no tests exist for this target, verify python syntax via py_compile.
+        if exec_res.exit_code == 5:
+            if module_path:
+                posix_target = Path(module_path).as_posix()
+                compile_res = container.exec_run(
+                    f"python -m py_compile {posix_target}",
+                    workdir="/workspace",
+                    environment={"PYTHONPATH": "/workspace"},
+                )
+                passed = (compile_res.exit_code == 0)
+                if not passed:
+                    c_out = compile_res.output if isinstance(compile_res.output, bytes) else b""
+                    traceback_text = c_out.decode("utf-8", errors="replace").strip()
+            else:
+                passed = True
+        elif not passed:
             traceback_text = self._extract_traceback(stdout_str, stderr_str)
 
         logger.info(

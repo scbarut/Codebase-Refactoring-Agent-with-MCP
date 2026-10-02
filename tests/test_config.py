@@ -38,6 +38,7 @@ def test_load_config_from_yaml(tmp_path: Path):
 
 
 def test_load_config_from_env(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("src.core.config._settings", None)
     monkeypatch.setenv("MIGRATION_AGENT_MAX_HEALING_ATTEMPTS", "7")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key-123")
     monkeypatch.setenv("DATABASE_URL", "postgresql://user:pass@db:5432/testdb")

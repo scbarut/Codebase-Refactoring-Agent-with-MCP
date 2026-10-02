@@ -626,41 +626,51 @@ class ConfigClassToModelConfigTransformer(cst.CSTTransformer):
 
         return cst.FlattenSentinel([assign])
 
-    def leave_ImportFrom(
-        self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
-    ) -> cst.ImportFrom:
-        """Add ConfigDict to pydantic imports and remove Extra if present."""
-        if not m.matches(updated_node, _PYDANTIC_IMPORT):
-            return updated_node
-        if not isinstance(updated_node.names, (list, tuple)):
+    def leave_Module(
+        self, original_node: cst.Module, updated_node: cst.Module
+    ) -> cst.Module:
+        """Add ConfigDict to pydantic imports only if an inner Config was transformed."""
+        if not self._add_configdict_import:
             return updated_node
 
-        has_configdict = any(
-            isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("ConfigDict"))
-            for alias in updated_node.names
-        )
+        class _PydanticImportUpdater(cst.CSTTransformer):
+            def leave_ImportFrom(
+                self, orig: cst.ImportFrom, updated: cst.ImportFrom
+            ) -> cst.ImportFrom:
+                if not m.matches(updated, _PYDANTIC_IMPORT):
+                    return updated
+                if not isinstance(updated.names, (list, tuple)):
+                    return updated
 
-        new_names: list[cst.ImportAlias] = []
-        for alias in updated_node.names:
-            # Remove Extra import (no longer needed in v2 for config)
-            if isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("Extra")):
-                continue
-            new_names.append(alias)
+                has_configdict = any(
+                    isinstance(alias, cst.ImportAlias)
+                    and m.matches(alias.name, m.Name("ConfigDict"))
+                    for alias in updated.names
+                )
 
-        # Add ConfigDict import if not already present
-        if not has_configdict and new_names:
-            # Add comma to current last import
-            if new_names:
-                last = new_names[-1]
-                if not isinstance(last.comma, cst.Comma):
-                    new_names[-1] = last.with_changes(
-                        comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
-                    )
-            new_names.append(cst.ImportAlias(name=cst.Name("ConfigDict")))
+                new_names: list[cst.ImportAlias] = []
+                for alias in updated.names:
+                    # Remove Extra import (no longer needed in v2 for config)
+                    if isinstance(alias, cst.ImportAlias) and m.matches(
+                        alias.name, m.Name("Extra")
+                    ):
+                        continue
+                    new_names.append(alias)
 
-        if new_names != list(updated_node.names):
-            return updated_node.with_changes(names=new_names)
-        return updated_node
+                # Add ConfigDict import if not already present
+                if not has_configdict and new_names:
+                    last = new_names[-1]
+                    if not isinstance(last.comma, cst.Comma):
+                        new_names[-1] = last.with_changes(
+                            comma=cst.Comma(whitespace_after=cst.SimpleWhitespace(" "))
+                        )
+                    new_names.append(cst.ImportAlias(name=cst.Name("ConfigDict")))
+
+                if new_names != list(updated.names):
+                    return updated.with_changes(names=new_names)
+                return updated
+
+        return updated_node.visit(_PydanticImportUpdater())
 
 
 # ── 4. BaseSettings import rewrite ─────────────────────────────────────
