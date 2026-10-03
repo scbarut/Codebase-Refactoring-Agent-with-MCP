@@ -104,7 +104,14 @@ def resolve_rule_set(target_library: str) -> str:
             f"No rule set registered for target library '{target_library}'. "
             f"Available: {sorted(_RULE_SET_REGISTRY)}"
         )
-    return _RULE_SET_REGISTRY[key]
+    rel_path = _RULE_SET_REGISTRY[key]
+    if Path(rel_path).is_file():
+        return rel_path
+    project_root = Path(__file__).resolve().parent.parent.parent
+    abs_path = project_root / rel_path
+    if abs_path.is_file():
+        return str(abs_path)
+    return rel_path
 
 
 # ── Risk arithmetic ────────────────────────────────────────────────────

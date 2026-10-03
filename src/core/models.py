@@ -5,7 +5,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 
 class RiskLevel(str, Enum):
@@ -14,6 +14,15 @@ class RiskLevel(str, Enum):
     LOW = "LOW"
     MEDIUM = "MEDIUM"
     HIGH = "HIGH"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Any:
+        if isinstance(value, str):
+            val_upper = value.upper()
+            for member in cls:
+                if member.value == val_upper or member.name == val_upper:
+                    return member
+        return None
 
 
 class MigrationJobConfig(BaseModel):
@@ -42,7 +51,9 @@ class MatchedRule(BaseModel):
         description: Human-readable explanation of what this rule transforms.
     """
 
-    rule_id: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    rule_id: str = Field(validation_alias=AliasChoices("rule_id", "id"))
     old_qualified_name: str
     new_qualified_name: str
     risk: RiskLevel
