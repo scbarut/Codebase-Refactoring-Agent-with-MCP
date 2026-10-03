@@ -20,7 +20,6 @@ An enterprise-grade autonomous engineering agent that ingests legacy Python code
 - [Agent Architecture & Workflow](#agent-architecture--workflow)
 - [Supported Migration Targets](#supported-migration-targets)
 - [Quick Start (Docker Compose)](#quick-start-docker-compose)
-- [Testing with Bundled `temprepo`](#testing-with-bundled-temprepo)
 - [Local Development Setup](#local-development-setup)
 - [CLI & API Reference](#cli--api-reference)
 - [Configuration & Model Routing](#configuration--model-routing)
@@ -309,17 +308,8 @@ docker compose up --build -d
 
 *(To stop: `docker compose down` | View logs: `docker compose logs -f`)*
 
----
-
-## Testing with Bundled `temprepo`
-
-This repository includes a ready-to-migrate sample codebase at [`./temprepo`](temprepo):
-
-- **Via Web UI**: Open [http://localhost:3000](http://localhost:3000) $\to$ **New Migration Job** $\to$ Target Path: `./temprepo`, Target: `pydantic` $\to$ Review plan $\to$ Approve files $\to$ Inspect live Monaco diff!
-- **Via CLI**:
-  ```bash
-  uv run migration-agent run ./temprepo --target pydantic --wait
-  ```
+> [!TIP]
+> You can test the platform immediately by submitting the included legacy sample repository at [`./temprepo`](temprepo) via the Web Dashboard or CLI.
 
 ---
 
@@ -337,6 +327,7 @@ uv pip install -e ".[dev]"              # or: pip install -e ".[dev]"
 
 # 3. Start FastAPI Backend (Port 8000)
 uvicorn src.api.main:app --reload --port 8000
+# (Or start the full stack with CLI: python -m src.cli start)
 
 # 4. Start Next.js Frontend (Port 3000)
 cd web && npm install && npm run dev
@@ -346,14 +337,18 @@ cd web && npm install && npm run dev
 
 ## CLI & API Reference
 
-### CLI Commands (`migration-agent`)
-| Command | Description |
-| :--- | :--- |
-| `migration-agent start` | Boots the full Docker Compose stack with health polling |
-| `migration-agent stop` | Stops all running stack containers cleanly |
-| `migration-agent run <path> -t <lib> [--wait]` | Submits a migration job and streams progress |
-| `migration-agent status [<job_id>]` | Checks overall stack health or specific job details |
-| `migration-agent mcp-ast / mcp-git / mcp-docs` | Launches standalone MCP servers over stdio |
+### CLI Commands (`migration-agent` / `python -m src.cli`)
+
+> [!TIP]
+> You can run any CLI command below either as `migration-agent <cmd>` or directly as **`python -m src.cli <cmd>`** (e.g. `.venv\Scripts\python.exe -m src.cli <cmd>` on Windows). This ensures commands run without requiring PATH modifications.
+
+| Command | Description | Example |
+| :--- | :--- | :--- |
+| `start` | Boots the full Docker Compose stack with health polling | `python -m src.cli start` |
+| `stop` | Stops all running stack containers cleanly | `python -m src.cli stop` |
+| `run` | Submits a migration job and streams progress | `python -m src.cli run ./my-repo -t pydantic --wait` |
+| `status` | Checks overall stack health or specific job details | `python -m src.cli status [<job_id>]` |
+| `mcp-*` | Launches standalone MCP servers over stdio (`mcp-ast`, `mcp-git`, `mcp-docs`) | `python -m src.cli mcp-ast` |
 
 ### Key REST & WebSocket Endpoints
 | Endpoint | Method | Purpose |
@@ -372,12 +367,12 @@ cd web && npm install && npm run dev
 Configure models in [`config.yaml`](config.example.yaml) using [LiteLLM](https://docs.litellm.ai/):
 
 ```yaml
-model_lite: "gemini/gemini-2.5-flash"      # Fast model for simple transforms
-model_default: "gemini/gemini-2.5-flash"   # Frontier model for complex fallback and self-heal patches
+model_lite: "gemini/gemini-3.5-flash"      # Fast model for simple transforms
+model_default: "gemini/gemini-3.5-flash"   # Frontier model for complex fallback and self-heal patches
 max_healing_attempts: 3                   # Max sandbox retry cycles per file
 ```
 
-**Supported Providers**: Google Gemini (`gemini/gemini-2.5-flash`), OpenAI (`openai/gpt-4o`), Anthropic (`anthropic/claude-3-5-sonnet-20241022`), Groq (`groq/llama-3.3-70b-versatile`), or local Ollama (`ollama/qwen2.5-coder:14b`).
+**Supported Providers**: Google Gemini (`gemini/gemini-3.5-flash`), OpenAI (`openai/gpt-4o`), Anthropic (`anthropic/claude-3-5-sonnet-20241022`), Groq (`groq/llama-3.3-70b-versatile`), or local Ollama (`ollama/qwen2.5-coder:14b`).
 
 **Web Search & Doc Fallback**: When an error or deprecated pattern isn't covered in the local `src/docs_corpus/`, `mcp-server-docs` automatically uses live web search via [Tavily](https://tavily.com/) if `TAVILY_API_KEY` is set in `.env` (with DuckDuckGo fallback).
 
