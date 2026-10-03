@@ -57,6 +57,14 @@ A per-file LangGraph sub-graph spawned by the Orchestration Graph for the rewrit
 _Avoid_: Child graph, file processor
 
 **Agent Workspace**:
-An isolated directory where the agent clones or copies the user's codebase and performs all modifications. Located at `~/.migration-agent/workspaces/<repo-name>-<timestamp>/`. The user's original repository is never modified in-place. After migration, the agent outputs copy-pasteable git commands (and optional PR trigger) for the user to apply changes.
+The isolated directory where the agent clones or copies the user's codebase and performs all modifications. Located at `~/.migration-agent/workspaces/<repo-name>-<timestamp>/`. The user's original repository is never modified in-place. After migration, the agent outputs copy-pasteable git commands (and optional PR trigger) for the user to apply changes.
 _Avoid_: Working directory, temp dir
+
+**Synthetic Test**:
+An automated smoke and contract test suite synthesized by the agent for an affected file that lacks existing test coverage in the user's codebase. Executed inside the Sandbox to drive the Self-Healing Loop.
+_Avoid_: Fake test, mock test, auto test, hallucinated test
+
+**Coverage Status**:
+The verification classification assigned to an affected file in the Migration Plan: `VERIFIED` (covered by existing human-authored tests), `SYNTHETIC` (covered by an agent-generated Synthetic Test), or `UNCOVERED` (no tests executed).
+_Avoid_: Test type, test mode
 

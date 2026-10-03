@@ -107,6 +107,9 @@ def test_clean_code_fence() -> None:
     plain = "def foo(): pass"
     assert _clean_code_fence(plain) == "def foo(): pass"
 
+    with_preamble = "Here is the fixed file:\n```python\ndef foo(): return 1\n```\nHope this helps!"
+    assert _clean_code_fence(with_preamble) == "def foo(): return 1"
+
 
 def test_compute_unified_diff() -> None:
     orig = "a = 1\nb = 2\n"

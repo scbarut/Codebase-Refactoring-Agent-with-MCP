@@ -101,6 +101,52 @@ def test_install_deps_with_requirements_txt(mock_docker_client, tmp_path):
     mock_container.exec_run.assert_called_once()
 
 
+def test_install_deps_with_utf16_and_windows_packages(mock_docker_client, tmp_path):
+    req_file = tmp_path / "requirements.txt"
+    # Write UTF-16 with BOM (PowerShell pip freeze output)
+    content = "pywin32==311\nlangchain==0.1.0\npywinpty==2.0.10\n"
+    req_file.write_bytes(content.encode("utf-16"))
+
+    mock_container = MagicMock()
+    mock_container.exec_run.return_value = MagicMock(exit_code=0, output=(b"Successfully installed", b""))
+
+    manager = SandboxManager(docker_client=mock_docker_client)
+    result = manager.install_deps(mock_container, workspace_path=tmp_path)
+
+    assert isinstance(result, InstallResult)
+    assert result.has_deps is True
+    assert result.exit_code == 0
+    clean_file = tmp_path / ".migration_agent_requirements.txt"
+    assert clean_file.exists()
+    clean_text = clean_file.read_text(encoding="utf-8")
+    assert "pywin32" not in clean_text
+    assert "pywinpty" not in clean_text
+    assert "langchain==0.1.0" in clean_text
+
+
+def test_install_deps_resilient_line_by_line_fallback(mock_docker_client, tmp_path):
+    req_file = tmp_path / "requirements.txt"
+    req_file.write_text("good-pkg==1.0\nbad-pkg==2.0\n", encoding="utf-8")
+
+    mock_container = MagicMock()
+
+    def side_effect(cmd, **kwargs):
+        if "-r" in cmd:
+            return MagicMock(exit_code=1, output=(b"", b"ERROR: No matching distribution for bad-pkg"))
+        if "good-pkg" in cmd:
+            return MagicMock(exit_code=0, output=(b"Successfully installed good-pkg", b""))
+        return MagicMock(exit_code=1, output=(b"", b"ERROR: No matching distribution for bad-pkg"))
+
+    mock_container.exec_run.side_effect = side_effect
+
+    manager = SandboxManager(docker_client=mock_docker_client)
+    result = manager.install_deps(mock_container, workspace_path=tmp_path)
+
+    assert isinstance(result, InstallResult)
+    assert result.has_deps is True
+    assert mock_container.exec_run.call_count >= 2
+
+
 def test_install_deps_with_pyproject_toml(mock_docker_client, tmp_path):
     pyproj = tmp_path / "pyproject.toml"
     pyproj.write_text("[project]\nname='demo'\n", encoding="utf-8")

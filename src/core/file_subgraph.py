@@ -43,6 +43,8 @@ from src.core.sandbox import SandboxManager
 
 logger = get_logger(__name__)
 
+SYNTHETIC_TEST_PREFIX: str = "_tmp_smoke_test_"
+
 
 def _get_ast_server():
     from src.mcp_servers.ast_server import create_ast_server
@@ -127,6 +129,13 @@ class FileSubgraphState(TypedDict, total=False):
     healing_attempts: int
     max_healing_attempts: int
 
+    # Synthetic Test state (ADR-0007)
+    test_file_path: str | None
+    is_synthetic_test: bool
+    persist_synthetic_test: bool
+    test_healing_attempts: int
+    test_content: str | None
+
     # Final result
     status: str
     diff: str
@@ -155,8 +164,11 @@ def route_model(risk: RiskLevel | str | None, config: Settings | None = None) ->
 
 
 def _clean_code_fence(text: str) -> str:
-    """Strip markdown code block fences (```python ... ```) from LLM output."""
+    """Strip markdown code block fences (```python ... ```) from LLM output, including any conversational preamble."""
     text = text.strip()
+    match = re.search(r"```(?:python)?\s*\n([\s\S]*?)```", text)
+    if match:
+        return match.group(1).strip()
     if text.startswith("```"):
         lines = text.splitlines()
         # Drop leading ``` or ```python
@@ -234,7 +246,12 @@ def _find_test_file(file_path: str, workspace_path: str) -> str | None:
                 return str(found.relative_to(ws)).replace("\\", "/")
 
     # 3. If file_path itself is a test file
-    if "test" in stem.lower() and (ws / file_path).exists():
+    is_test_file = (
+        stem.startswith("test_")
+        or stem.endswith("_test")
+        or "tests" in Path(file_path).parts
+    )
+    if is_test_file and (ws / file_path).exists():
         return str(file_path).replace("\\", "/")
 
     # 4. Search test files that import this module
@@ -274,6 +291,45 @@ def _find_test_file(file_path: str, workspace_path: str) -> str | None:
                 continue
 
     return None
+
+
+def _disambiguate_failure(traceback: str, test_file_path: str, source_file_path: str) -> str:
+    """Disambiguate whether test failure was in the test fixture/caller frame or source module.
+
+    Returns:
+        "test_frame" if the failure frame is in the synthetic test file without entering the source module.
+        "source_frame" if the exception occurred inside the migrated source module.
+    """
+    if not traceback:
+        return "source_frame"
+
+    source_stem = Path(source_file_path).name
+    test_stem = Path(test_file_path).name
+
+    # Check if the traceback enters the source module
+    enters_source = any(
+        f'File "{source_stem}"' in line
+        or f"/{source_stem}" in line
+        or f"\\{source_stem}" in line
+        or f'"{source_file_path}"' in line
+        for line in traceback.splitlines()
+    )
+    if enters_source:
+        return "source_frame"
+
+    # Check if failure occurs in test file frame
+    has_test_frame = any(
+        f'File "{test_stem}"' in line
+        or f"/{test_stem}" in line
+        or f"\\{test_stem}" in line
+        or f'"{test_file_path}"' in line
+        for line in traceback.splitlines()
+    )
+    if has_test_frame:
+        return "test_frame"
+
+    return "source_frame"
+
 
 
 def _extract_query_from_traceback(tb: str) -> str:
@@ -639,6 +695,89 @@ async def llm_fallback(state: FileSubgraphState) -> dict[str, Any]:
     return {"current_content": current_content}
 
 
+async def generate_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
+    """Ensure a test target exists: use existing test file or synthesize an AST-grounded smoke test."""
+    file_path = state["file_path"]
+    workspace_path = state["workspace_path"]
+    target_library = state.get("target_library", "target library")
+
+    existing_test = _find_test_file(file_path, workspace_path)
+    if existing_test:
+        return {
+            "test_file_path": existing_test,
+            "is_synthetic_test": False,
+        }
+
+    # No existing test file: synthesize an AST-grounded smoke test (ADR-0007)
+    stem = Path(file_path).stem
+    test_file_name = f"{SYNTHETIC_TEST_PREFIX}{stem}.py"
+    abs_test_path = _resolve_file_path(workspace_path, test_file_name)
+    abs_source_path = _resolve_file_path(workspace_path, file_path)
+
+    ast_server = state.get("ast_server")
+    if ast_server is None:
+        ast_server = _get_ast_server()
+
+    try:
+        sig_data = await call_mcp_tool(
+            ast_server,
+            "extract_signatures",
+            {"file_path": str(abs_source_path).replace("\\", "/")},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Signature extraction failed for synthetic test", error=str(exc))
+        sig_data = {"classes": [], "functions": []}
+
+    current_content = state.get("current_content")
+    if not current_content and abs_source_path.is_file():
+        current_content = abs_source_path.read_text(encoding="utf-8")
+    current_content = current_content or ""
+
+    config = load_config()
+    model = route_model(state.get("risk"), config=config)
+
+    prompt = (
+        f"You are generating a minimal, robust pytest smoke and contract test for the Python file '{file_path}' "
+        f"which has been migrated to '{target_library}'.\n\n"
+        f"AST Signatures in this file:\n{json.dumps(sig_data, indent=2)}\n\n"
+        f"Migrated File Content:\n```python\n{current_content}\n```\n\n"
+        f"Requirements:\n"
+        f"1. Import the module or symbols from '{stem}'.\n"
+        f"2. Write 1-3 simple test functions (e.g. test_smoke_{stem}) that instantiate classes with mock/default values and execute basic methods.\n"
+        f"3. Mock or patch any external network, database, cloud, or LLM clients (e.g., pymongo/MongoClient, redis/Redis, openai, httpx, requests) at module or test scope using unittest.mock (MagicMock, patch) so import-time and instantiation-time connections do not fail or hang in an offline sandbox.\n"
+        f"4. The goal is to verify that the module compiles, imports cleanly, and runs basic logic without syntax or initialization errors.\n"
+        f"5. Return ONLY executable python test code in ```python ... ``` fences."
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert test engineer writing minimal, safe pytest smoke tests. Return ONLY python code in ```python ... ``` fences.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    llm_client = state.get("llm_client")
+    test_code_raw = await _call_llm(model=model, messages=messages, llm_client=llm_client)
+    test_code = _clean_code_fence(test_code_raw)
+
+    if test_code:
+        abs_test_path.write_text(test_code, encoding="utf-8")
+
+    logger.info(
+        "Synthesized smoke test for uncovered file",
+        file=file_path,
+        synthetic_test=test_file_name,
+    )
+
+    return {
+        "test_file_path": test_file_name,
+        "is_synthetic_test": True,
+        "test_content": test_code,
+        "test_healing_attempts": 0,
+    }
+
+
 async def run_tests(state: FileSubgraphState) -> dict[str, Any]:
     """Run scoped pytest targeting the modified module in the Docker Sandbox."""
     file_path = state["file_path"]
@@ -650,7 +789,7 @@ async def run_tests(state: FileSubgraphState) -> dict[str, Any]:
     sandbox_container = (
         state.get("sandbox_container") or _current_sandbox_container.get()
     )
-    test_target = _find_test_file(file_path, workspace_path)
+    test_target = state.get("test_file_path") or _find_test_file(file_path, workspace_path)
 
     if sandbox_container is None:
         logger.info(
@@ -706,12 +845,93 @@ def route_after_test(state: FileSubgraphState) -> str:
     if state.get("passed"):
         return "finalize"
 
+    # If synthetic test failed, check if failure is in test frame before source was entered
+    if state.get("is_synthetic_test"):
+        test_attempts = state.get("test_healing_attempts", 0)
+        traceback_val = state.get("traceback", "")
+        test_file = state.get("test_file_path", "")
+        source_file = state.get("file_path", "")
+        failure_frame = _disambiguate_failure(traceback_val, test_file, source_file)
+        if failure_frame == "test_frame" and test_attempts < 1:
+            return "heal_synthetic_test"
+
     max_attempts = state.get("max_healing_attempts", 3)
     attempts = state.get("healing_attempts", 0)
 
     if attempts < max_attempts:
         return "extract_traceback"
     return "finalize"
+
+
+async def heal_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
+    """Heal an invalid synthetic test fixture when the error is in the caller frame."""
+    test_healing_attempts = state.get("test_healing_attempts", 0) + 1
+    file_path = state["file_path"]
+    workspace_path = state["workspace_path"]
+    test_file_path = state.get("test_file_path")
+    if not test_file_path:
+        test_file_path = f"{SYNTHETIC_TEST_PREFIX}{Path(file_path).stem}.py"
+
+    abs_test_path = _resolve_file_path(workspace_path, test_file_path)
+    abs_source_path = _resolve_file_path(workspace_path, file_path)
+
+    test_content = state.get("test_content")
+    if not test_content and abs_test_path.is_file():
+        test_content = abs_test_path.read_text(encoding="utf-8")
+    test_content = test_content or ""
+
+    source_content = state.get("current_content")
+    if not source_content and abs_source_path.is_file():
+        source_content = abs_source_path.read_text(encoding="utf-8")
+    source_content = source_content or ""
+
+    traceback_val = state.get("traceback", "")
+    target_library = state.get("target_library", "target library")
+
+    config = load_config()
+    model = route_model(state.get("risk"), config=config)
+
+    logger.info(
+        "Healing synthetic smoke test fixture",
+        file=file_path,
+        test_file=test_file_path,
+        attempt=test_healing_attempts,
+    )
+
+    prompt = (
+        f"You are fixing an invalid synthetic pytest smoke test for the Python file '{file_path}' "
+        f"which has been migrated to '{target_library}'.\n\n"
+        f"The test failed because the test fixture made an invalid call, wrong argument, or failed import.\n\n"
+        f"Test Failure Traceback:\n```\n{traceback_val}\n```\n\n"
+        f"Current Test Code:\n```python\n{test_content}\n```\n\n"
+        f"Source File Code:\n```python\n{source_content}\n```\n\n"
+        f"Requirements:\n"
+        f"1. Fix the test fixture so that it correctly imports and instantiates the classes or functions from '{Path(file_path).stem}'.\n"
+        f"2. Keep the test minimal and safe. Do not test complex business logic.\n"
+        f"3. Mock or patch any external database, network, or third-party service connections (e.g. MongoClient, Redis, API clients) with unittest.mock if the test failed due to connection or missing service errors.\n"
+        f"4. Return ONLY valid, executable Python pytest code in ```python ... ``` fences."
+    )
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are an expert test engineer fixing an invalid pytest smoke test fixture. Return ONLY python code in ```python ... ``` fences.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    llm_client = state.get("llm_client")
+    healed_raw = await _call_llm(model=model, messages=messages, llm_client=llm_client)
+    healed_code = _clean_code_fence(healed_raw)
+
+    if healed_code:
+        abs_test_path.write_text(healed_code, encoding="utf-8")
+        test_content = healed_code
+
+    return {
+        "test_healing_attempts": test_healing_attempts,
+        "test_content": test_content,
+    }
 
 
 async def extract_traceback(state: FileSubgraphState) -> dict[str, Any]:
@@ -897,6 +1117,26 @@ async def finalize(state: FileSubgraphState) -> dict[str, Any]:
     passed = state.get("passed", False)
     file_path = state["file_path"]
     attempts = state.get("healing_attempts", 0)
+    workspace_path = state.get("workspace_path")
+
+    # Clean up or persist ephemeral synthetic tests (ADR-0007)
+    if state.get("is_synthetic_test") and state.get("test_file_path") and workspace_path:
+        test_file_path = state["test_file_path"]
+        abs_test_path = _resolve_file_path(workspace_path, test_file_path)
+        persist = state.get("persist_synthetic_test", False)
+        if persist and abs_test_path.is_file():
+            tests_dir = Path(workspace_path) / "tests"
+            tests_dir.mkdir(parents=True, exist_ok=True)
+            stem = Path(file_path).stem
+            target_path = tests_dir / f"test_{stem}_synthetic.py"
+            abs_test_path.rename(target_path)
+            logger.info("Persisted synthetic test", source=str(abs_test_path), target=str(target_path))
+        elif abs_test_path.is_file():
+            try:
+                abs_test_path.unlink()
+                logger.info("Removed ephemeral synthetic test", file=str(abs_test_path))
+            except OSError as exc:
+                logger.warning("Failed to clean up ephemeral synthetic test", file=str(abs_test_path), error=str(exc))
 
     if passed:
         status = FileStatus.SUCCESS
@@ -945,7 +1185,9 @@ def build_file_subgraph() -> StateGraph:
 
     builder.add_node("apply_rules", apply_rules)
     builder.add_node("llm_fallback", llm_fallback)
+    builder.add_node("generate_synthetic_test", generate_synthetic_test)
     builder.add_node("run_tests", run_tests)
+    builder.add_node("heal_synthetic_test", heal_synthetic_test)
     builder.add_node("extract_traceback", extract_traceback)
     builder.add_node("query_docs", query_docs)
     builder.add_node("patch_code", patch_code)
@@ -958,10 +1200,11 @@ def build_file_subgraph() -> StateGraph:
         route_after_apply,
         {
             "llm_fallback": "llm_fallback",
-            "run_tests": "run_tests",
+            "run_tests": "generate_synthetic_test",
         },
     )
-    builder.add_edge("llm_fallback", "run_tests")
+    builder.add_edge("llm_fallback", "generate_synthetic_test")
+    builder.add_edge("generate_synthetic_test", "run_tests")
 
     builder.add_conditional_edges(
         "run_tests",
@@ -969,8 +1212,10 @@ def build_file_subgraph() -> StateGraph:
         {
             "finalize": "finalize",
             "extract_traceback": "extract_traceback",
+            "heal_synthetic_test": "heal_synthetic_test",
         },
     )
+    builder.add_edge("heal_synthetic_test", "run_tests")
 
     builder.add_edge("extract_traceback", "query_docs")
     builder.add_edge("query_docs", "patch_code")
@@ -1001,6 +1246,7 @@ async def run_file_subgraph(
     max_healing_attempts: int = 3,
     checkpointer: Any = None,
     original_content: str | None = None,
+    persist_synthetic_test: bool = False,
 ) -> FileResult:
     """Execute the File Sub-graph on a single file and return its FileResult.
 
@@ -1015,6 +1261,7 @@ async def run_file_subgraph(
         "risk": risk,
         "healing_attempts": 0,
         "max_healing_attempts": max_healing_attempts,
+        "persist_synthetic_test": persist_synthetic_test,
     }
     if original_content is not None:
         initial_state["original_content"] = original_content

@@ -41,6 +41,7 @@ from src.core.logging import get_logger
 from src.core.mcp_client import call_mcp_tool
 from src.core.models import (
     AffectedNode,
+    CoverageStatus,
     FilePlanEntry,
     FileResult,
     FileStatus,
@@ -420,14 +421,19 @@ async def _build_file_plan_entry(
     # Compute per-file risk: max risk among matched rules, bumped +1 if no test coverage
     rule_risks = [r.risk for r in matched_rules]
     file_risk = _max_risk(rule_risks)
-    if not _has_test_coverage(rel_file, workspace_path):
+    has_test_cov = _has_test_coverage(rel_file, workspace_path)
+    if not has_test_cov:
         file_risk = _bump_risk(file_risk)
+        coverage_status = CoverageStatus.UNCOVERED
+    else:
+        coverage_status = CoverageStatus.VERIFIED
 
     return FilePlanEntry(
         file_path=rel_file,
         matched_rules=matched_rules,
         affected_nodes=affected_nodes,
         risk=file_risk,
+        coverage_status=coverage_status,
     )
 
 

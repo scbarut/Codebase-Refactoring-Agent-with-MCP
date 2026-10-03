@@ -66,6 +66,14 @@ class AffectedNode(BaseModel):
     end_line: int
 
 
+class CoverageStatus(str, Enum):
+    """Test coverage status for an affected file in the Migration Plan."""
+
+    VERIFIED = "VERIFIED"
+    SYNTHETIC = "SYNTHETIC"
+    UNCOVERED = "UNCOVERED"
+
+
 class FilePlanEntry(BaseModel):
     """One entry in the Migration Plan: a single file to be rewritten.
 
@@ -74,12 +82,14 @@ class FilePlanEntry(BaseModel):
         matched_rules: Rules that apply to this file.
         affected_nodes: AST nodes that will be modified.
         risk: Computed per-file risk (max rule risk, bumped +1 if no test coverage).
+        coverage_status: Test verification classification (VERIFIED, SYNTHETIC, UNCOVERED).
     """
 
     file_path: str
     matched_rules: list[MatchedRule] = Field(default_factory=list)
     affected_nodes: list[AffectedNode] = Field(default_factory=list)
     risk: RiskLevel = RiskLevel.LOW
+    coverage_status: CoverageStatus = CoverageStatus.UNCOVERED
 
 
 class FileStatus(str, Enum):
