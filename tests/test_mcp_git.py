@@ -342,3 +342,10 @@ def test_resolve_local_source_path_windows_style(tmp_path: Path, monkeypatch: py
     with pytest.raises(FileNotFoundError):
         _resolve_local_source_path(r"C:\NonExistent\Path\missing_repo")
 
+    # 6. Existing path outside allowed roots raises ValueError
+    external_dir = tmp_path.parent / "unauthorized_external_repo"
+    external_dir.mkdir(exist_ok=True)
+    monkeypatch.setenv("ALLOWED_SOURCE_ROOT", str(sample_repo))
+    with pytest.raises(ValueError, match="outside allowed roots"):
+        _resolve_local_source_path(str(external_dir))
+

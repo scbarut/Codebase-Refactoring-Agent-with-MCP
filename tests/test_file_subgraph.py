@@ -163,6 +163,11 @@ def test_resolve_file_path(tmp_path: Path) -> None:
     assert resolved == (tmp_path / "foo/bar.py").resolve()
 
 
+def test_resolve_file_path_traversal_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="escapes workspace boundary"):
+        _resolve_file_path(str(tmp_path), "../../etc/passwd")
+
+
 def test_normalize_matched_rules() -> None:
     # 1. Empty / None
     assert _normalize_matched_rules(None) == []

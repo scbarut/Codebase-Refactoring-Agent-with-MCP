@@ -4,6 +4,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,18 +56,46 @@ def _extract_repo_name(source: str) -> str:
 
 
 def _resolve_local_source_path(source: str) -> Path:
-    """Resolve a local source path, gracefully handling Windows paths inside Docker containers."""
+    """Resolve a local source path, gracefully handling Windows paths inside Docker containers.
+
+    Enforces that resolved paths are contained within allowed source boundaries to prevent arbitrary
+    host filesystem ingestion.
+    """
     norm = source.strip().strip("'\"").replace("\\", "/").rstrip("/")
+
+    try:
+        config = load_config()
+        configured_root = getattr(config, "allowed_source_root", None) or os.environ.get("ALLOWED_SOURCE_ROOT")
+    except Exception:
+        configured_root = os.environ.get("ALLOWED_SOURCE_ROOT")
+
+    allowed_roots: list[Path] = []
+    if configured_root:
+        allowed_roots.append(Path(configured_root).resolve())
+    else:
+        allowed_roots.append(Path.cwd().resolve())
+        try:
+            allowed_roots.append(Path(tempfile.gettempdir()).resolve())
+        except Exception:
+            pass
+
+    def _verify_boundary(candidate_path: Path) -> Path:
+        resolved = candidate_path.resolve()
+        if not any(resolved.is_relative_to(root) for root in allowed_roots):
+            raise ValueError(
+                f"Source directory '{source}' is outside allowed roots: {[str(r) for r in allowed_roots]}"
+            )
+        return resolved
 
     # 1. Direct path check (works on host or native Linux paths)
     direct = Path(norm).resolve()
-    if direct.exists():
-        return direct
+    if direct.exists() and direct.is_dir():
+        return _verify_boundary(direct)
 
     # 2. Relative from current working directory
     rel = (Path.cwd() / norm.lstrip("/")).resolve()
-    if rel.exists():
-        return rel
+    if rel.exists() and rel.is_dir():
+        return _verify_boundary(rel)
 
     # 3. Handle host Windows absolute path inside a Linux Docker container:
     # E.g. source is 'C:/Users/.../temprepo', but inside container cwd is '/app' and temprepo is at '/app/temprepo'
@@ -75,7 +104,7 @@ def _resolve_local_source_path(source: str) -> Path:
         sub_rel = "/".join(parts[i:])
         candidate = (Path.cwd() / sub_rel).resolve()
         if candidate.exists() and candidate.is_dir():
-            return candidate
+            return _verify_boundary(candidate)
 
     raise FileNotFoundError(
         f"Source directory does not exist: {source} (resolved as {direct})"

@@ -82,6 +82,16 @@ def test_create_sandbox(mock_docker_client, tmp_path):
     mount_info = next(v for k, v in volumes.items() if str(tmp_path.resolve()) in k or tmp_path.as_posix() in k)
     assert mount_info["bind"] == "/workspace"
     assert mount_info["mode"] == "rw"
+    assert call_kwargs["security_opt"] == ["no-new-privileges:true"]
+    assert call_kwargs["mem_limit"] == "2g"
+    assert call_kwargs["pids_limit"] == 200
+    assert "SYS_ADMIN" in call_kwargs["cap_drop"]
+
+    # Test network_mode parameter propagation
+    mock_docker_client.containers.run.reset_mock()
+    manager.create_sandbox(workspace_path=tmp_path, python_version="3.11", network_mode="none")
+    _, isolated_kwargs = mock_docker_client.containers.run.call_args
+    assert isolated_kwargs["network_mode"] == "none"
 
 
 def test_install_deps_with_requirements_txt(mock_docker_client, tmp_path):

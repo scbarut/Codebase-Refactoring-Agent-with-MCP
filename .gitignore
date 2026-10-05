@@ -54,6 +54,7 @@ autonomous_codebase_refactoring_migration_agent.md
 
 # Local Agent Customizations
 .agents/
+skills-lock.json
 
 # Local test repo
 temprepo/

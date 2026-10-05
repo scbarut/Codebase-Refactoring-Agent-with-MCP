@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from pathlib import Path
@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     rules_dir: str = Field(default="src/rules", description="Rules directory")
     docs_corpus_dir: str = Field(
         default="src/docs_corpus", description="Docs corpus directory"
+    )
+
+    # Security boundaries
+    allowed_source_root: str | None = Field(
+        default=None,
+        description="Allowed root directory for local repository ingestion (defaults to project root and tempdir)",
     )
 
     @property

@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import docker.errors
 from docker.models.containers import Container
@@ -221,12 +222,14 @@ class SandboxManager:
         self,
         workspace_path: Path | str,
         python_version: str = "3.11",
+        network_mode: str | None = None,
     ) -> Container:
         """Spins up a fresh container per Migration Job with Agent Workspace mounted read-write.
 
         Args:
             workspace_path: Path to the Agent Workspace on the host.
             python_version: Target Python version (e.g. '3.11', '3.10').
+            network_mode: Optional Docker network mode (e.g. 'none' for network isolation).
 
         Returns:
             The started Docker Container instance.
@@ -252,17 +255,27 @@ class SandboxManager:
             image=image_tag,
         )
 
-        container = self.client.containers.run(
-            image_tag,
-            command=["tail", "-f", "/dev/null"],
-            detach=True,
-            working_dir="/workspace",
-            volumes=volume_mount,
-            labels={
+        run_kwargs: dict[str, Any] = {
+            "command": ["tail", "-f", "/dev/null"],
+            "detach": True,
+            "working_dir": "/workspace",
+            "volumes": volume_mount,
+            "security_opt": ["no-new-privileges:true"],
+            "mem_limit": "2g",
+            "pids_limit": 200,
+            "cap_drop": ["SYS_ADMIN", "NET_ADMIN", "SYS_PTRACE"],
+            "labels": {
                 "managed-by": "migration-agent",
                 "python-version": python_version,
                 "workspace": str(resolved_workspace),
             },
+        }
+        if network_mode is not None:
+            run_kwargs["network_mode"] = network_mode
+
+        container = self.client.containers.run(
+            image_tag,
+            **run_kwargs,
         )
 
         logger.info("sandbox_container_created", container_id=getattr(container, "id", "")[:12])
@@ -274,6 +287,7 @@ class SandboxManager:
         workspace_path: Path | str,
         target_library: str | None = None,
         python_version: str = "3.11",
+        network_mode: str | None = None,
     ) -> AsyncIterator[Container | None]:
         """Async context manager that provisions, configures, and safely tears down a Sandbox container.
 
@@ -285,6 +299,7 @@ class SandboxManager:
             container = self.create_sandbox(
                 workspace_path=workspace_path,
                 python_version=python_version,
+                network_mode=network_mode,
             )
             self.install_deps(
                 container,

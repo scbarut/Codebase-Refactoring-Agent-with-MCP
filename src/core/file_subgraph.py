@@ -199,8 +199,12 @@ def _compute_unified_diff(original: str, current: str, file_path: str) -> str:
 
 
 def _resolve_file_path(workspace_path: str, file_path: str) -> Path:
-    """Resolve a relative workspace file path to an absolute Path."""
-    return (Path(workspace_path) / file_path).resolve()
+    """Resolve a relative workspace file path to an absolute Path, preventing traversal escapes."""
+    ws = Path(workspace_path).resolve()
+    target = (ws / file_path).resolve()
+    if not target.is_relative_to(ws):
+        raise ValueError(f"Path '{file_path}' escapes workspace boundary '{ws}'")
+    return target
 
 
 def _normalize_matched_rules(rules: list[Any] | None) -> list[MatchedRule]:
