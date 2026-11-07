@@ -52,6 +52,15 @@ WINDOWS_ONLY_PACKAGES: set[str] = {
     "pythonnet",
 }
 
+# Companion packages that must be installed alongside a target library upgrade.
+# When a migration upgrades a library that split out functionality into separate
+# packages in a later major version, all companions are installed so the migrated
+# code can import them without further self-healing cycles.
+_COMPANION_PACKAGES: dict[str, list[str]] = {
+    # pydantic v2 moved BaseSettings to the standalone pydantic-settings package.
+    "pydantic": ["pydantic-settings"],
+}
+
 
 def _decode_requirements_bytes(raw_bytes: bytes) -> str:
     """Decode requirements.txt raw bytes handling UTF-8, UTF-16 LE/BE, and BOMs."""
@@ -477,6 +486,35 @@ class SandboxManager:
             cmd = f"{cmd} && {target_cmd}" if cmd else target_cmd
             if exit_code == 0:
                 exit_code = exec_target.exit_code
+
+            # Install companion packages required by the new major version of target_library.
+            # e.g. pydantic v2 split BaseSettings into the separate pydantic-settings package.
+            base_lib = re.split(r"[>=<!@\[]", target_library.strip())[0].lower().strip()
+            companions = _COMPANION_PACKAGES.get(base_lib, [])
+            if companions:
+                companion_cmd = f"pip install --no-cache-dir {' '.join(companions)}"
+                logger.info(
+                    "sandbox_installing_companion_packages",
+                    base_library=base_lib,
+                    companions=companions,
+                    container_id=container.id[:12],
+                )
+                exec_comp = container.exec_run(
+                    companion_cmd,
+                    workdir="/workspace",
+                    environment={"PYTHONPATH": "/workspace"},
+                    demux=True,
+                )
+                c_out, c_err = (
+                    exec_comp.output if isinstance(exec_comp.output, tuple) else (exec_comp.output, b"")
+                )
+                c_out_str = (c_out or b"").decode("utf-8", errors="replace")
+                c_err_str = (c_err or b"").decode("utf-8", errors="replace")
+                companion_output = f"{c_out_str}\n{c_err_str}".strip()
+                combined_output = f"{combined_output}\n{companion_output}".strip() if combined_output else companion_output
+                cmd = f"{cmd} && {companion_cmd}"
+                if exit_code == 0:
+                    exit_code = exec_comp.exit_code
 
         if not cmd:
             logger.info("sandbox_no_deps_detected")

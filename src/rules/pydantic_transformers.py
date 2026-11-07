@@ -637,7 +637,9 @@ class ConfigClassToModelConfigTransformer(cst.CSTTransformer):
             def leave_ImportFrom(
                 self, orig: cst.ImportFrom, updated: cst.ImportFrom
             ) -> cst.ImportFrom:
-                if not m.matches(updated, _PYDANTIC_IMPORT):
+                # Only match the top-level `from pydantic import ...` line,
+                # NOT submodule imports like `from pydantic.generics import ...`.
+                if not m.matches(updated, m.ImportFrom(module=m.Name("pydantic"))):
                     return updated
                 if not isinstance(updated.names, (list, tuple)):
                     return updated
@@ -864,15 +866,35 @@ class FieldRegexToPatternTransformer(cst.CSTTransformer):
 class GenericModelToBaseModelTransformer(cst.CSTTransformer):
     """Replace ``GenericModel`` inheritance with ``BaseModel``.
 
-    Changes ``from pydantic.generics import GenericModel`` to
-    ``from pydantic import BaseModel`` and updates the class base.
+    Removes ``from pydantic.generics import GenericModel`` entirely when
+    ``BaseModel`` is already imported from ``pydantic`` (the common case after
+    other transformers have run), or rewrites it to
+    ``from pydantic import BaseModel`` otherwise.  Avoids the duplicate-import
+    bug that occurred when both a rewritten and a pre-existing pydantic import
+    line co-existed in the same module.
     """
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Track whether a plain ``from pydantic import ... BaseModel ...`` line
+        # already exists so we know whether to drop the generics import or rewrite it.
+        self._has_pydantic_basemodel_import: bool = False
+
+    def visit_ImportFrom(self, node: cst.ImportFrom) -> None:
+        """Pre-pass: detect existing BaseModel import from pydantic."""
+        if (
+            m.matches(node, m.ImportFrom(module=m.Name("pydantic")))
+            and isinstance(node.names, (list, tuple))
+        ):
+            for alias in node.names:
+                if isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("BaseModel")):
+                    self._has_pydantic_basemodel_import = True
 
     def leave_ImportFrom(
         self, original_node: cst.ImportFrom, updated_node: cst.ImportFrom
-    ) -> cst.ImportFrom:
+    ) -> cst.ImportFrom | cst.RemovalSentinel:
         # Match: from pydantic.generics import GenericModel
-        if (
+        if not (
             m.matches(
                 updated_node,
                 m.ImportFrom(
@@ -881,13 +903,32 @@ class GenericModelToBaseModelTransformer(cst.CSTTransformer):
             )
             and isinstance(updated_node.names, (list, tuple))
         ):
-            for alias in updated_node.names:
-                if isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("GenericModel")):
-                    return updated_node.with_changes(
-                        module=cst.Name("pydantic"),
-                        names=[cst.ImportAlias(name=cst.Name("BaseModel"))],
-                    )
-        return updated_node
+            return updated_node
+
+        has_genericmodel = any(
+            isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("GenericModel"))
+            for alias in updated_node.names
+        )
+        if not has_genericmodel:
+            return updated_node
+
+        # If BaseModel is already imported from pydantic, just drop this line entirely.
+        if self._has_pydantic_basemodel_import:
+            return cst.RemovalSentinel.REMOVE
+
+        # Otherwise rewrite to: from pydantic import BaseModel
+        remaining = [
+            alias for alias in updated_node.names
+            if not (isinstance(alias, cst.ImportAlias) and m.matches(alias.name, m.Name("GenericModel")))
+        ]
+        if remaining:
+            # Other names from pydantic.generics remain — keep the line without GenericModel.
+            return updated_node.with_changes(names=remaining)
+        # GenericModel was the only import; replace the whole line.
+        return updated_node.with_changes(
+            module=cst.Name("pydantic"),
+            names=[cst.ImportAlias(name=cst.Name("BaseModel"))],
+        )
 
     def leave_ClassDef(
         self, original_node: cst.ClassDef, updated_node: cst.ClassDef

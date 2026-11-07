@@ -30,6 +30,7 @@ from src.core.file_subgraph import (
     _compute_unified_diff,
     _extract_query_from_traceback,
     _find_test_file,
+    _is_failure_in_source,
     _normalize_matched_rules,
     _resolve_file_path,
     apply_rules,
@@ -156,6 +157,19 @@ def test_extract_query_from_traceback() -> None:
     )
     query = _extract_query_from_traceback(tb)
     assert "AttributeError: 'UserModel' object has no attribute 'dict'" in query
+
+    # With trailing Pydantic URL hint line
+    tb_with_url = (
+        "Traceback (most recent call last):\n"
+        "  File 'test_models.py', line 5, in <module>\n"
+        "    from pydantic import BaseSettings\n"
+        "E   pydantic.errors.PydanticImportError: `BaseSettings` has been moved to the `pydantic-settings` package.\n"
+        "E   For further information visit https://errors.pydantic.dev/2.14/u/import-error\n"
+    )
+    query_url = _extract_query_from_traceback(tb_with_url)
+    assert "PydanticImportError" in query_url
+    assert "BaseSettings" in query_url
+    assert "https://" not in query_url
 
 
 def test_resolve_file_path(tmp_path: Path) -> None:
@@ -721,4 +735,87 @@ async def test_call_llm_retries_on_service_unavailable(monkeypatch: pytest.Monke
     )
     assert result == "fixed code"
     assert attempts == 2
+
+
+def test_is_failure_in_source() -> None:
+    source = "schemas.py"
+    # Failure in unmigrated models.py during test_models.py collection
+    tb_external = (
+        "Traceback (most recent call last):\n"
+        "  File '/workspace/tests/test_models.py', line 4, in <module>\n"
+        "    from models import LegacyModel\n"
+        "  File '/workspace/models.py', line 12, in <module>\n"
+        "    from pydantic import BaseSettings\n"
+        "ImportError: cannot import name 'BaseSettings'\n"
+    )
+    assert not _is_failure_in_source(tb_external, source)
+    assert _is_failure_in_source(tb_external, "models.py")
+
+    # Failure directly in schemas.py
+    tb_source = (
+        "Traceback (most recent call last):\n"
+        "  File '/workspace/tests/test_models.py', line 10, in <module>\n"
+        "    from schemas import UserSchema\n"
+        "  File '/workspace/schemas.py', line 20, in <module>\n"
+        "    class UserSchema(BaseModel):\n"
+        "ValueError: invalid schema\n"
+    )
+    assert _is_failure_in_source(tb_source, source)
+
+
+@pytest.mark.asyncio
+async def test_run_tests_fallback_to_synthetic_on_external_failure(tmp_path: Path) -> None:
+    """When an existing test file fails during collection on an unmigrated sibling file,
+
+    run_tests should detect the failure is not in the source module and fall back to
+    synthesizing an isolated smoke test.
+    """
+    ws, src_file = _setup_workspace_file(tmp_path, "schemas.py", "class UserSchema: pass\n")
+
+    # Existing test fails on models.py
+    tb_external = (
+        "Traceback (most recent call last):\n"
+        "  File 'tests/test_models.py', line 2, in <module>\n"
+        "    import models\n"
+        "ModuleNotFoundError: No module named 'models'\n"
+    )
+
+    external_fail_result = TestResult(
+        passed=False,
+        exit_code=2,
+        output="collection error",
+        traceback=tb_external,
+    )
+    synth_pass_result = TestResult(
+        passed=True,
+        exit_code=0,
+        output="1 passed",
+        traceback="",
+    )
+
+    sandbox_mgr = MagicMock()
+    # First call returns external_fail_result (running test_models.py),
+    # second call returns synth_pass_result (running fallback synthetic test)
+    sandbox_mgr.run_tests.side_effect = [external_fail_result, synth_pass_result]
+
+    mock_llm = AsyncMock()
+    mock_llm.return_value = "def test_schemas():\n    from schemas import UserSchema\n    assert UserSchema is not None\n"
+
+    state: FileSubgraphState = {
+        "file_path": "schemas.py",
+        "workspace_path": str(ws),
+        "target_library": "pydantic",
+        "current_content": "class UserSchema: pass\n",
+        "test_file_path": "tests/test_models.py",
+        "is_synthetic_test": False,
+        "sandbox_manager": sandbox_mgr,
+        "sandbox_container": MagicMock(),
+        "llm_client": mock_llm,
+    }
+
+    res = await run_tests(state)
+    assert res["passed"] is True
+    assert res["is_synthetic_test"] is True
+    assert "_tmp_smoke_test_schemas.py" in res["test_file_path"]
+
 

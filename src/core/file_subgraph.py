@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 _current_sandbox_container: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "current_sandbox_container", default=None
@@ -94,54 +94,54 @@ def _prune_unused_imports(file_path: Path) -> None:
 # ── State Schema ───────────────────────────────────────────────────────
 
 
-class FileSubgraphState(TypedDict, total=False):
+class FileSubgraphState(TypedDict):
     """Episodic state carried through the File Sub-graph for a single file."""
 
-    # File identity & context
+    # File identity & context (always required for any file sub-graph step)
     file_path: str
     workspace_path: str
-    target_library: str
-    risk: RiskLevel | str
+    target_library: NotRequired[str]
+    risk: NotRequired[RiskLevel | str]
 
     # Matched rules & AST context
-    matched_rules: list[MatchedRule] | list[Any]
-    unmatched_rules: list[dict[str, Any]]
-    affected_nodes: list[dict[str, Any]]
+    matched_rules: NotRequired[list[MatchedRule] | list[Any]]
+    unmatched_rules: NotRequired[list[dict[str, Any]]]
+    affected_nodes: NotRequired[list[dict[str, Any]]]
 
     # Content tracking
-    original_content: str
-    current_content: str
+    original_content: NotRequired[str]
+    current_content: NotRequired[str]
 
     # Execution dependencies (injectable / stubbable)
-    sandbox_manager: Any
-    sandbox_container: Any
-    ast_server: Any
-    docs_server: Any
-    llm_client: Any
+    sandbox_manager: NotRequired[Any]
+    sandbox_container: NotRequired[Any]
+    ast_server: NotRequired[Any]
+    docs_server: NotRequired[Any]
+    llm_client: NotRequired[Any]
 
     # Test & Self-Healing state
-    test_result: Any
-    passed: bool
-    exit_code: int
-    output: str
-    traceback: str
-    doc_context: str
-    healing_attempts: int
-    max_healing_attempts: int
+    test_result: NotRequired[Any]
+    passed: NotRequired[bool]
+    exit_code: NotRequired[int]
+    output: NotRequired[str]
+    traceback: NotRequired[str]
+    doc_context: NotRequired[str]
+    healing_attempts: NotRequired[int]
+    max_healing_attempts: NotRequired[int]
 
     # Synthetic Test state (ADR-0007)
-    test_file_path: str | None
-    is_synthetic_test: bool
-    persist_synthetic_test: bool
-    test_healing_attempts: int
-    test_content: str | None
+    test_file_path: NotRequired[str | None]
+    is_synthetic_test: NotRequired[bool]
+    persist_synthetic_test: NotRequired[bool]
+    test_healing_attempts: NotRequired[int]
+    test_content: NotRequired[str | None]
 
     # Final result
-    status: str
-    diff: str
-    attempt_count: int
-    file_result: dict[str, Any]
-    error: str | None
+    status: NotRequired[str]
+    diff: NotRequired[str]
+    attempt_count: NotRequired[int]
+    file_result: NotRequired[dict[str, Any]]
+    error: NotRequired[str | None]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -272,13 +272,15 @@ def _find_test_file(file_path: str, workspace_path: str) -> str | None:
                 except ValueError:
                     continue
         for candidate in sorted(ws.rglob("*.py")):
-            if (
-                candidate.name.startswith("test_")
-                or candidate.name.endswith("_test.py")
+            if candidate.name.startswith("test_") or candidate.name.endswith(
+                "_test.py"
             ):
                 try:
                     rel = candidate.relative_to(ws)
-                    if not any(p in ignored for p in rel.parts) and candidate not in candidate_test_files:
+                    if (
+                        not any(p in ignored for p in rel.parts)
+                        and candidate not in candidate_test_files
+                    ):
                         candidate_test_files.append(candidate)
                 except ValueError:
                     continue
@@ -297,59 +299,96 @@ def _find_test_file(file_path: str, workspace_path: str) -> str | None:
     return None
 
 
-def _disambiguate_failure(traceback: str, test_file_path: str, source_file_path: str) -> str:
-    """Disambiguate whether test failure was in the test fixture/caller frame or source module.
+def _disambiguate_failure(
+    traceback: str, test_file_path: str | None, source_file_path: str
+) -> str:
+    """Disambiguate whether test failure was in the test fixture/caller frame, source module, or external frame.
 
     Returns:
-        "test_frame" if the failure frame is in the synthetic test file without entering the source module.
         "source_frame" if the exception occurred inside the migrated source module.
+        "test_frame" if the failure frame is in the test file without entering the source module.
+        "external_frame" if the failure occurred in an external or sibling module outside both test and source.
     """
     if not traceback:
         return "source_frame"
 
-    source_stem = Path(source_file_path).name
-    test_stem = Path(test_file_path).name
-
-    # Check if the traceback enters the source module
-    enters_source = any(
-        f'File "{source_stem}"' in line
-        or f"/{source_stem}" in line
-        or f"\\{source_stem}" in line
-        or f'"{source_file_path}"' in line
-        for line in traceback.splitlines()
-    )
-    if enters_source:
+    if _is_failure_in_source(traceback, source_file_path):
         return "source_frame"
 
-    # Check if failure occurs in test file frame
-    has_test_frame = any(
-        f'File "{test_stem}"' in line
-        or f"/{test_stem}" in line
-        or f"\\{test_stem}" in line
-        or f'"{test_file_path}"' in line
-        for line in traceback.splitlines()
-    )
-    if has_test_frame:
-        return "test_frame"
+    if test_file_path:
+        test_stem = Path(test_file_path).name
+        if test_stem:
+            has_test_frame = any(
+                f'File "{test_stem}"' in line
+                or f"/{test_stem}" in line
+                or f"\\{test_stem}" in line
+                or f'"{test_file_path}"' in line
+                for line in traceback.splitlines()
+            )
+            if has_test_frame:
+                return "test_frame"
 
-    return "source_frame"
+    return "external_frame"
 
+
+def _is_failure_in_source(traceback: str, source_file_path: str) -> bool:
+    """Check if the failure traceback explicitly enters the source file being migrated."""
+    if not traceback:
+        return False
+    source_stem = Path(source_file_path).name
+    posix_path = Path(source_file_path).as_posix()
+    for line in traceback.splitlines():
+        if (
+            f'File "{source_stem}"' in line
+            or f"/{source_stem}" in line
+            or f"\\{source_stem}" in line
+            or f'"{source_file_path}"' in line
+            or f'"{posix_path}"' in line
+            or line.strip().startswith(f"{source_stem}:")
+            or line.strip().startswith(f"{posix_path}:")
+        ):
+            return True
+    return False
 
 
 def _extract_query_from_traceback(tb: str) -> str:
     """Extract key error lines from a pytest traceback to use as doc search query."""
     lines = tb.strip().splitlines()
-    error_lines = [
-        line.strip().lstrip("E ").strip()
-        for line in lines
-        if line.strip().startswith("E ") or "Error:" in line or "Exception:" in line
-    ]
+    error_lines: list[str] = []
+    for line in lines:
+        cleaned = line.strip().lstrip("E ").strip()
+        if not cleaned:
+            continue
+        # Filter out informational URLs and generic hint lines from libraries (e.g. Pydantic errors.dev links)
+        if cleaned.startswith(
+            (
+                "For further information visit",
+                "See https://",
+                "See http://",
+                "http://",
+                "https://",
+            )
+        ):
+            continue
+        if line.strip().startswith("E ") or "Error:" in line or "Exception:" in line:
+            error_lines.append(cleaned)
+
+    # Prioritize explicit Error / Exception statements
+    explicit_errors = [el for el in error_lines if "Error" in el or "Exception" in el]
+    if explicit_errors:
+        return explicit_errors[-1]
     if error_lines:
         return error_lines[-1]
-    # Fallback to last non-empty line
+
+    # Fallback to last non-empty line that isn't a URL or pytest banner
     for line in reversed(lines):
-        if line.strip() and not line.strip().startswith("="):
-            return line.strip()
+        cl = line.strip()
+        if (
+            cl
+            and not cl.startswith("=")
+            and not cl.startswith(("For further information", "http://", "https://"))
+        ):
+            return cl
     return tb[:200]
 
 
@@ -379,22 +418,24 @@ async def _call_llm(
         else:
             raise ValueError(f"Unsupported llm_client type: {type(llm_client)}")
 
-        if isinstance(res, str):
-            return res
-        if hasattr(res, "choices") and res.choices:
-            choice = res.choices[0]
+        res_any: Any = res
+        if isinstance(res_any, str):
+            return res_any
+        if hasattr(res_any, "choices") and res_any.choices:
+            choice = res_any.choices[0]
             if hasattr(choice, "message"):
                 return getattr(choice.message, "content", "") or ""
             if isinstance(choice, dict):
                 return choice.get("message", {}).get("content", "")
-        if isinstance(res, dict):
-            if "content" in res:
-                return res["content"]
-            if "choices" in res:
-                return res["choices"][0]["message"]["content"]
-        return str(res)
+        if isinstance(res_any, dict):
+            if "content" in res_any:
+                return res_any["content"]
+            if "choices" in res_any:
+                return res_any["choices"][0]["message"]["content"]
+        return str(res_any)
 
     import litellm
+    import litellm.exceptions as litellm_exceptions
 
     config = load_config()
     kwargs: dict[str, Any] = {
@@ -422,13 +463,17 @@ async def _call_llm(
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await litellm.acompletion(**kwargs)
-            return response.choices[0].message.content or ""
+            response: Any = await litellm.acompletion(**kwargs)
+            if hasattr(response, "choices") and response.choices:
+                choice = response.choices[0]
+                if hasattr(choice, "message"):
+                    return getattr(choice.message, "content", "") or ""
+            return ""
         except (
-            litellm.ServiceUnavailableError,
-            litellm.RateLimitError,
-            litellm.APIConnectionError,
-            litellm.Timeout,
+            litellm_exceptions.ServiceUnavailableError,
+            litellm_exceptions.RateLimitError,
+            litellm_exceptions.APIConnectionError,
+            litellm_exceptions.Timeout,
         ) as err:
             if attempt == max_attempts:
                 logger.error(
@@ -593,7 +638,9 @@ async def llm_fallback(state: FileSubgraphState) -> dict[str, Any]:
     doc_sections: list[str] = []
     for r in unmatched:
         rule_id = r.get("rule_id", "")
-        if rule_id == "unmatched-general" or not (r.get("old_qualified_name") or r.get("description")):
+        if rule_id == "unmatched-general" or not (
+            r.get("old_qualified_name") or r.get("description")
+        ):
             query = f"{target_library} migration guide"
         else:
             query = (
@@ -645,7 +692,10 @@ async def llm_fallback(state: FileSubgraphState) -> dict[str, Any]:
                 )
                 web_chunks = web_res.get("chunks", [])
                 answer = web_res.get("answer")
-                if answer and not any("Tavily Migration Synthesis" in c.get("title", "") for c in web_chunks):
+                if answer and not any(
+                    "Tavily Migration Synthesis" in c.get("title", "")
+                    for c in web_chunks
+                ):
                     doc_sections.append(f"### Tavily AI Synthesis\n{answer}")
                 for c in web_chunks:
                     doc_sections.append(
@@ -699,26 +749,21 @@ async def llm_fallback(state: FileSubgraphState) -> dict[str, Any]:
     return {"current_content": current_content}
 
 
-async def generate_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
-    """Ensure a test target exists: use existing test file or synthesize an AST-grounded smoke test."""
-    file_path = state["file_path"]
-    workspace_path = state["workspace_path"]
-    target_library = state.get("target_library", "target library")
-
-    existing_test = _find_test_file(file_path, workspace_path)
-    if existing_test:
-        return {
-            "test_file_path": existing_test,
-            "is_synthetic_test": False,
-        }
-
-    # No existing test file: synthesize an AST-grounded smoke test (ADR-0007)
+async def _synthesize_smoke_test(
+    file_path: str,
+    workspace_path: str,
+    target_library: str,
+    current_content: str,
+    risk: Any,
+    ast_server: Any = None,
+    llm_client: Any = None,
+) -> tuple[str, str]:
+    """Synthesize an isolated AST-grounded smoke test file on disk and return (test_file_name, test_code)."""
     stem = Path(file_path).stem
     test_file_name = f"{SYNTHETIC_TEST_PREFIX}{stem}.py"
     abs_test_path = _resolve_file_path(workspace_path, test_file_name)
     abs_source_path = _resolve_file_path(workspace_path, file_path)
 
-    ast_server = state.get("ast_server")
     if ast_server is None:
         ast_server = _get_ast_server()
 
@@ -732,13 +777,12 @@ async def generate_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
         logger.debug("Signature extraction failed for synthetic test", error=str(exc))
         sig_data = {"classes": [], "functions": []}
 
-    current_content = state.get("current_content")
     if not current_content and abs_source_path.is_file():
         current_content = abs_source_path.read_text(encoding="utf-8")
     current_content = current_content or ""
 
     config = load_config()
-    model = route_model(state.get("risk"), config=config)
+    model = route_model(risk, config=config)
 
     prompt = (
         f"You are generating a minimal, robust pytest smoke and contract test for the Python file '{file_path}' "
@@ -761,8 +805,9 @@ async def generate_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
         {"role": "user", "content": prompt},
     ]
 
-    llm_client = state.get("llm_client")
-    test_code_raw = await _call_llm(model=model, messages=messages, llm_client=llm_client)
+    test_code_raw = await _call_llm(
+        model=model, messages=messages, llm_client=llm_client
+    )
     test_code = _clean_code_fence(test_code_raw)
 
     if test_code:
@@ -772,6 +817,32 @@ async def generate_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
         "Synthesized smoke test for uncovered file",
         file=file_path,
         synthetic_test=test_file_name,
+    )
+    return test_file_name, test_code
+
+
+async def generate_synthetic_test(state: FileSubgraphState) -> dict[str, Any]:
+    """Ensure a test target exists: use existing test file or synthesize an AST-grounded smoke test."""
+    file_path = state["file_path"]
+    workspace_path = state["workspace_path"]
+    target_library = state.get("target_library", "target library")
+
+    existing_test = _find_test_file(file_path, workspace_path)
+    if existing_test:
+        return {
+            "test_file_path": existing_test,
+            "is_synthetic_test": False,
+        }
+
+    # No existing test file: synthesize an AST-grounded smoke test (ADR-0007)
+    test_file_name, test_code = await _synthesize_smoke_test(
+        file_path=file_path,
+        workspace_path=workspace_path,
+        target_library=target_library,
+        current_content=state.get("current_content") or "",
+        risk=state.get("risk"),
+        ast_server=state.get("ast_server"),
+        llm_client=state.get("llm_client"),
     )
 
     return {
@@ -793,7 +864,9 @@ async def run_tests(state: FileSubgraphState) -> dict[str, Any]:
     sandbox_container = (
         state.get("sandbox_container") or _current_sandbox_container.get()
     )
-    test_target = state.get("test_file_path") or _find_test_file(file_path, workspace_path)
+    test_target = state.get("test_file_path") or _find_test_file(
+        file_path, workspace_path
+    )
 
     if sandbox_container is None:
         logger.info(
@@ -834,6 +907,63 @@ async def run_tests(state: FileSubgraphState) -> dict[str, Any]:
         exit_code = 0
         if not output or "no tests ran" in output:
             output = "No scoped tests collected for module; verified."
+
+    # If scoped tests failed, check if the failure is in an external module or collection failure
+    # without entering the source module being migrated. If so, an unmigrated or broken external file
+    # caused the test failure, not the migrated code. Fall back to an isolated synthetic test for this file.
+    is_synth = state.get("is_synthetic_test", False)
+    if (
+        not passed
+        and not is_synth
+        and not _is_failure_in_source(traceback_val, file_path)
+    ):
+        logger.warning(
+            "Scoped test target failed due to external dependency or collection error without entering source module; falling back to isolated synthetic smoke test",
+            file=file_path,
+            test_target=test_target,
+            exit_code=exit_code,
+        )
+        try:
+            synth_name, synth_code = await _synthesize_smoke_test(
+                file_path=file_path,
+                workspace_path=workspace_path,
+                target_library=state.get("target_library", "target library"),
+                current_content=state.get("current_content") or "",
+                risk=state.get("risk"),
+                ast_server=state.get("ast_server"),
+                llm_client=state.get("llm_client"),
+            )
+            if synth_name:
+                if inspect.iscoroutinefunction(run_fn):
+                    synth_res = await run_fn(
+                        container=sandbox_container, module_path=synth_name
+                    )
+                else:
+                    res = run_fn(container=sandbox_container, module_path=synth_name)
+                    synth_res = await res if inspect.iscoroutine(res) else res
+
+                test_res = synth_res
+                passed = getattr(synth_res, "passed", False)
+                exit_code = getattr(synth_res, "exit_code", 1 if not passed else 0)
+                output = getattr(synth_res, "output", "")
+                traceback_val = getattr(synth_res, "traceback", "") or ""
+                return {
+                    "test_result": test_res,
+                    "passed": passed,
+                    "exit_code": exit_code,
+                    "output": output,
+                    "traceback": traceback_val,
+                    "test_file_path": synth_name,
+                    "is_synthetic_test": True,
+                    "test_content": synth_code,
+                    "test_healing_attempts": 0,
+                }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Fallback synthetic smoke test failed to execute",
+                file=file_path,
+                error=str(exc),
+            )
 
     return {
         "test_result": test_res,
@@ -1015,10 +1145,14 @@ async def query_docs(state: FileSubgraphState) -> dict[str, Any]:
             web_chunks = web_res.get("chunks", [])
             answer = web_res.get("answer")
             web_parts = []
-            if answer and not any("Tavily Migration Synthesis" in c.get("title", "") for c in web_chunks):
+            if answer and not any(
+                "Tavily Migration Synthesis" in c.get("title", "") for c in web_chunks
+            ):
                 web_parts.append(f"### Tavily AI Synthesis\n{answer}")
             for c in web_chunks:
-                web_parts.append(f"### {c.get('title', 'Web Doc')}\n{c.get('content', '')}")
+                web_parts.append(
+                    f"### {c.get('title', 'Web Doc')}\n{c.get('content', '')}"
+                )
             if web_parts:
                 web_context = "\n\n".join(web_parts)
                 if not doc_context or not has_matched_rules:
@@ -1064,13 +1198,15 @@ async def patch_code(state: FileSubgraphState) -> dict[str, Any]:
 
         cb = _dispatch_progress_callback.get()
         if cb is not None:
-            cb({
-                "type": "healing_attempt",
-                "file_path": file_path,
-                "attempt": attempts,
-                "max_attempts": state.get("max_healing_attempts", 3),
-                "message": f"Self-healing attempt {attempts}/3 for {file_path}",
-            })
+            cb(
+                {
+                    "type": "healing_attempt",
+                    "file_path": file_path,
+                    "attempt": attempts,
+                    "max_attempts": state.get("max_healing_attempts", 3),
+                    "message": f"Self-healing attempt {attempts}/3 for {file_path}",
+                }
+            )
     except Exception:  # noqa: BLE001, S110
         pass
 
@@ -1124,8 +1260,12 @@ async def finalize(state: FileSubgraphState) -> dict[str, Any]:
     workspace_path = state.get("workspace_path")
 
     # Clean up or persist ephemeral synthetic tests (ADR-0007)
-    if state.get("is_synthetic_test") and state.get("test_file_path") and workspace_path:
-        test_file_path = state["test_file_path"]
+    if (
+        state.get("is_synthetic_test")
+        and state.get("test_file_path")
+        and workspace_path
+    ):
+        test_file_path = str(state.get("test_file_path") or "")
         abs_test_path = _resolve_file_path(workspace_path, test_file_path)
         persist = state.get("persist_synthetic_test", False)
         if persist and abs_test_path.is_file():
@@ -1134,13 +1274,21 @@ async def finalize(state: FileSubgraphState) -> dict[str, Any]:
             stem = Path(file_path).stem
             target_path = tests_dir / f"test_{stem}_synthetic.py"
             abs_test_path.rename(target_path)
-            logger.info("Persisted synthetic test", source=str(abs_test_path), target=str(target_path))
+            logger.info(
+                "Persisted synthetic test",
+                source=str(abs_test_path),
+                target=str(target_path),
+            )
         elif abs_test_path.is_file():
             try:
                 abs_test_path.unlink()
                 logger.info("Removed ephemeral synthetic test", file=str(abs_test_path))
             except OSError as exc:
-                logger.warning("Failed to clean up ephemeral synthetic test", file=str(abs_test_path), error=str(exc))
+                logger.warning(
+                    "Failed to clean up ephemeral synthetic test",
+                    file=str(abs_test_path),
+                    error=str(exc),
+                )
 
     if passed:
         status = FileStatus.SUCCESS
